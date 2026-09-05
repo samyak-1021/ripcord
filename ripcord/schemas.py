@@ -74,3 +74,20 @@ class FlagOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     rules: list[TargetingRuleOut] = Field(default_factory=list)
+
+
+class EvaluateRequest(BaseModel):
+    """Request to evaluate one flag for a given user + attribute context."""
+
+    flag_key: str
+    user_id: str
+    context: dict[str, str] = Field(default_factory=dict)
+
+
+class EvaluateResponse(BaseModel):
+    """The evaluation outcome for a flag/user pair, with the deciding reason."""
+
+    flag_key: str
+    user_id: str
+    enabled: bool
+    reason: str

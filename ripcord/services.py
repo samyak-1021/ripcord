@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import StaleDataError
 
+from ripcord.engine import Evaluation, FlagSpec, RuleSpec, evaluate
 from ripcord.models import AuditLog, Flag, TargetingRule
 from ripcord.schemas import FlagCreate, FlagUpdate, TargetingRuleIn
 
@@ -139,3 +140,29 @@ async def delete_flag(session: AsyncSession, key: str, actor: str = "system") ->
     await session.delete(flag)
     await session.commit()
     return True
+
+
+def _to_spec(flag: Flag) -> FlagSpec:
+    """Project an ORM Flag (with its rules) into an engine FlagSpec."""
+    return FlagSpec(
+        key=flag.key,
+        enabled=flag.enabled,
+        rollout_percentage=flag.rollout_percentage,
+        rules=[
+            RuleSpec(attribute=r.attribute, operator=r.operator, values=list(r.values))
+            for r in flag.rules
+        ],
+    )
+
+
+async def evaluate_flag(
+    session: AsyncSession,
+    key: str,
+    user_id: str,
+    context: dict[str, str] | None = None,
+) -> Evaluation:
+    """Evaluate a flag for a user. An unknown flag resolves to 'off' (fail-safe)."""
+    flag = await get_flag(session, key)
+    if flag is None:
+        return Evaluation(enabled=False, reason="flag_not_found")
+    return evaluate(_to_spec(flag), user_id, context)
