@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { api, type Flag, type Rule } from "@/lib/api";
 
@@ -29,6 +29,13 @@ export function RulesEditor({
   const [rules, setRules] = useState<DraftRule[]>(toDraft(flag.rules));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Re-seed from the server whenever the flag actually changes (its version
+  // bumps) — e.g. after a save or a change made elsewhere — so the editor
+  // always reflects the source of truth rather than a stale draft.
+  useEffect(() => {
+    setRules(toDraft(flag.rules));
+  }, [flag.version]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const update = (i: number, patch: Partial<DraftRule>) =>
     setRules((rs) => rs.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));

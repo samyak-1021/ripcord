@@ -57,10 +57,20 @@ export type FlagUpdate = {
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const json = { "Content-Type": "application/json" };
 
+// Error that carries the HTTP status, so callers can branch on 404 / 409.
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 async function handle<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { detail?: string };
-    throw new Error(body.detail ?? `Request failed (${res.status})`);
+    throw new ApiError(body.detail ?? `Request failed (${res.status})`, res.status);
   }
   if (res.status === 204) return undefined as unknown as T;
   return (await res.json()) as T;

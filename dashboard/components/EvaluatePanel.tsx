@@ -14,6 +14,7 @@ export function EvaluatePanel({ flagKey }: { flagKey?: string }) {
   const [userId, setUserId] = useState("user-123");
   const [country, setCountry] = useState("");
   const [result, setResult] = useState<Evaluation | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const targetKey = flagKey ?? key;
@@ -21,9 +22,13 @@ export function EvaluatePanel({ flagKey }: { flagKey?: string }) {
   async function run(e: FormEvent) {
     e.preventDefault();
     setBusy(true);
+    setError(null);
     try {
       const context: Record<string, string> = country ? { country } : {};
       setResult(await api.evaluate(targetKey, userId, context));
+    } catch (err) {
+      setError((err as Error).message);
+      setResult(null);
     } finally {
       setBusy(false);
     }
@@ -87,6 +92,7 @@ export function EvaluatePanel({ flagKey }: { flagKey?: string }) {
           </span>
         )}
       </div>
+      {error && <p className="mt-2 text-xs text-red-500">{error}</p>}
     </form>
   );
 }
