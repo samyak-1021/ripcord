@@ -2,11 +2,12 @@
 
 from fastapi import FastAPI
 
-from ripcord import __version__
+from ripcord import __version__, metrics
 from ripcord.api.evaluate import router as evaluate_router
 from ripcord.api.flags import router as flags_router
 from ripcord.api.health import router as health_router
 from ripcord.api.realtime import router as realtime_router
+from ripcord.logging_config import configure_logging
 
 
 def create_app() -> FastAPI:
@@ -16,11 +17,16 @@ def create_app() -> FastAPI:
     trivial to build fresh inside tests, and gives us one obvious place to
     mount new feature routers as the project grows.
     """
+    configure_logging()
+
     app = FastAPI(
         title="Ripcord",
         summary="A self-hostable feature-flag & gradual-rollout service.",
         version=__version__,
     )
+
+    # Prometheus request metrics + /metrics endpoint.
+    metrics.setup_metrics(app)
 
     # Feature routers are registered here.
     app.include_router(health_router)
