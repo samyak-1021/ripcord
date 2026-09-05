@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Environment (never commit real secrets)
+.env
+
+# Node (dashboard, added in a later phase)
+node_modules/
+.next/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

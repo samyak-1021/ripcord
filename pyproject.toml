@@ -1,0 +1,44 @@
+[project]
+name = "ripcord"
+version = "0.1.0"
+description = "A self-hostable feature-flag & gradual-rollout service"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "pydantic-settings>=2.6",
+]
+
+# Installed with `pip install -e ".[dev]"` — kept separate so production
+# images don't ship test/lint tooling.
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "httpx>=0.28",   # required by fastapi.testclient
+    "ruff>=0.9",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+# Only ship the `ripcord` package — never the tests/ dir.
+[tool.setuptools.packages.find]
+include = ["ripcord*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# E/F = pyflakes+pycodestyle, I = import sorting, UP = pyupgrade, B = bugbear.
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Silence known third-party deprecation noise (starlette TestClient + anyio),
+# so a failing/real warning from our own code actually stands out.
+filterwarnings = [
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated",
+]
