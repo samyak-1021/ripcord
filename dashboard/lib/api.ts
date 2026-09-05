@@ -29,7 +29,33 @@ export type Evaluation = {
   reason: string;
 };
 
+export type AuditEntry = {
+  id: number;
+  flag_key: string;
+  action: string;
+  actor: string;
+  details: Record<string, unknown> | null;
+  created_at: string;
+};
+
+export type Stats = {
+  flags_total: number;
+  flags_enabled: number;
+  flags_disabled: number;
+  evaluations_total: number;
+  evaluations_by_result: Record<string, number>;
+};
+
+export type FlagUpdate = {
+  version: number;
+  name?: string;
+  enabled?: boolean;
+  rollout_percentage?: number;
+  rules?: Omit<Rule, "id">[];
+};
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const json = { "Content-Type": "application/json" };
 
 async function handle<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -40,12 +66,13 @@ async function handle<T>(res: Response): Promise<T> {
   return (await res.json()) as T;
 }
 
-const json = { "Content-Type": "application/json" };
-
 export const api = {
   streamUrl: () => `${API_URL}/stream`,
 
   listFlags: () => fetch(`${API_URL}/flags`).then((r) => handle<Flag[]>(r)),
+
+  getFlag: (key: string) =>
+    fetch(`${API_URL}/flags/${key}`).then((r) => handle<Flag>(r)),
 
   createFlag: (body: {
     key: string;
@@ -59,10 +86,7 @@ export const api = {
       body: JSON.stringify(body),
     }).then((r) => handle<Flag>(r)),
 
-  updateFlag: (
-    key: string,
-    body: { version: number; enabled?: boolean; rollout_percentage?: number },
-  ) =>
+  updateFlag: (key: string, body: FlagUpdate) =>
     fetch(`${API_URL}/flags/${key}`, {
       method: "PATCH",
       headers: json,
@@ -80,4 +104,11 @@ export const api = {
       headers: json,
       body: JSON.stringify({ flag_key: flagKey, user_id: userId, context }),
     }).then((r) => handle<Evaluation>(r)),
+
+  listAudit: (flagKey?: string) => {
+    const qs = flagKey ? `?flag_key=${encodeURIComponent(flagKey)}` : "";
+    return fetch(`${API_URL}/audit${qs}`).then((r) => handle<AuditEntry[]>(r));
+  },
+
+  getStats: () => fetch(`${API_URL}/stats`).then((r) => handle<Stats>(r)),
 };
