@@ -170,3 +170,25 @@ async def evaluate_flag(
     if flag is None:
         return Evaluation(enabled=False, reason="flag_not_found")
     return evaluate(_to_spec(flag), user_id, context)
+
+
+async def list_audit(
+    session: AsyncSession, flag_key: str | None = None, limit: int = 100
+) -> list[AuditLog]:
+    """Return recent audit entries, newest first, optionally filtered by flag."""
+    stmt = select(AuditLog).order_by(AuditLog.id.desc()).limit(limit)
+    if flag_key is not None:
+        stmt = stmt.where(AuditLog.flag_key == flag_key)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def compute_stats(session: AsyncSession) -> dict[str, int]:
+    """Aggregate flag counts (enabled vs disabled) for the metrics page."""
+    flags = await list_flags(session)
+    enabled = sum(1 for flag in flags if flag.enabled)
+    return {
+        "flags_total": len(flags),
+        "flags_enabled": enabled,
+        "flags_disabled": len(flags) - enabled,
+    }

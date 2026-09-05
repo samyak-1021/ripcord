@@ -60,3 +60,18 @@ def setup_metrics(app: FastAPI) -> None:
     @app.get("/metrics", include_in_schema=False)
     def metrics_endpoint() -> Response:
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+def evaluation_counts() -> dict[str, int]:
+    """Read the current flag-evaluation counter values, keyed by result."""
+    counts: dict[str, int] = {}
+    for metric in flag_evaluations_total.collect():
+        for sample in metric.samples:
+            # A Counter emits both a `_total` sample (the count) and a
+            # `_created` sample (a timestamp) per label set — only take counts.
+            if not sample.name.endswith("_total"):
+                continue
+            result = sample.labels.get("result")
+            if result is not None:
+                counts[result] = int(sample.value)
+    return counts
