@@ -57,6 +57,23 @@ SDK, so client and server can never disagree. Order of precedence:
 2. **A matching targeting rule** → on (rules are allow-list overrides).
 3. **Percentage rollout** by sticky bucket → on / off.
 
+## API
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | Liveness probe |
+| `POST` | `/flags` | Create a flag |
+| `GET` | `/flags` | List all flags |
+| `GET` | `/flags/{key}` | Get one flag |
+| `PATCH` | `/flags/{key}` | Update a flag (version-checked, optimistic locking) |
+| `DELETE` | `/flags/{key}` | Delete a flag |
+| `POST` | `/evaluate` | Evaluate a flag for a user + context |
+| `GET` | `/ruleset` | Full ruleset for SDK bootstrap (Redis-cached) |
+| `GET` | `/stream` | SSE stream of `flag-change` events |
+| `GET` | `/audit` | Recent change history (optional `?flag_key=`) |
+| `GET` | `/stats` | Flag counts + evaluation totals |
+| `GET` | `/metrics` | Prometheus metrics |
+
 ## Tech stack
 
 | Area | Choice |
@@ -134,6 +151,8 @@ await client.close()
 `/evaluate` is the server path (a DB lookup per call). Apps use the **SDK**, whose local
 path is microseconds with no network hop.
 
+> Numbers are a single run on an M-series laptop — indicative, not a formal benchmark.
+
 ## Deployment
 
 - **`docker compose up -d --build`** — the quick local stack.
@@ -147,15 +166,18 @@ pytest -q          # unit + integration (spins ephemeral Postgres/Redis via test
 ruff check .
 ```
 
+> Requires a running Docker daemon — testcontainers spins ephemeral Postgres + Redis.
+
 The evaluation engine has dedicated unit tests for determinism, **monotonicity**, and
-rollout **distribution**; the API and SDK have integration tests against a real database.
+rollout **distribution**; the API, SDK (incl. the SSE watch loop), and optimistic-locking
+concurrency are covered by integration tests against a real database.
 
 ## Project structure
 
 ```
 ripcord/
 ├── ripcord/            # FastAPI backend
-│   ├── api/            # routers: flags, evaluate, realtime, health
+│   ├── api/            # routers: flags, evaluate, realtime, insights, health
 │   ├── engine.py       # pure evaluation engine (shared with the SDK)
 │   ├── services.py     # flag CRUD + optimistic locking + audit log
 │   ├── cache.py        # Redis ruleset cache + pub/sub

@@ -66,7 +66,7 @@ class TargetingRule(Base):
     )
     # The user attribute this rule inspects, e.g. "country" or "plan".
     attribute: Mapped[str] = mapped_column(String(128))
-    # Comparison operator, e.g. "in", "eq", "neq" (evaluated in Phase 3).
+    # Comparison operator, e.g. "in", "eq", "neq" (see the evaluation engine).
     operator: Mapped[str] = mapped_column(String(32))
     # Values to compare against, stored as JSONB (e.g. ["IN", "US"]).
     values: Mapped[list[str]] = mapped_column(JSONB)
