@@ -31,7 +31,10 @@ class Flag(Base):
     enabled: Mapped[bool] = mapped_column(default=False)
     # Percentage of otherwise-unmatched users who receive the flag (0..100).
     rollout_percentage: Mapped[int] = mapped_column(default=0)
-    # Optimistic-locking counter, bumped on every update (used in Phase 2).
+    # Optimistic-locking counter. We bump it ourselves on every update, and
+    # `version_id_col` below makes SQLAlchemy add a `WHERE version = :old`
+    # guard to each UPDATE/DELETE — so a concurrent writer's stale change is
+    # rejected instead of silently lost.
     version: Mapped[int] = mapped_column(default=1)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -40,10 +43,15 @@ class Flag(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
+    __mapper_args__ = {"version_id_col": version, "version_id_generator": False}
+
+    # `selectin` eager-loads rules in a follow-up query, avoiding lazy-load
+    # I/O inside async handlers (which SQLAlchemy forbids).
     rules: Mapped[list["TargetingRule"]] = relationship(
         back_populates="flag",
         cascade="all, delete-orphan",
         order_by="TargetingRule.priority",
+        lazy="selectin",
     )
 
 

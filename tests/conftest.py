@@ -1,14 +1,16 @@
-"""Shared pytest fixtures: an ephemeral Postgres for database-backed tests."""
+"""Shared pytest fixtures: an ephemeral Postgres and an HTTP client."""
 
 from collections.abc import AsyncGenerator, Generator
 
 import pytest
 import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from testcontainers.community.postgres import PostgresContainer
 
 import ripcord.models  # noqa: F401  # imported so models register on Base.metadata
-from ripcord.db import Base
+from ripcord.db import Base, get_session
+from ripcord.main import create_app
 
 
 @pytest.fixture(scope="session")
@@ -39,3 +41,18 @@ async def session(postgres_url: str) -> AsyncGenerator[AsyncSession, None]:
         yield db_session
 
     await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def client(session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
+    """An HTTP client whose app uses the per-test database session."""
+    app = create_app()
+
+    async def _use_test_session() -> AsyncGenerator[AsyncSession, None]:
+        yield session
+
+    app.dependency_overrides[get_session] = _use_test_session
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as http_client:
+        yield http_client
+    app.dependency_overrides.clear()
