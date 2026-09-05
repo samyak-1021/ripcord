@@ -1,19 +1,12 @@
 """HTTP endpoints for creating, reading, updating, and deleting flags."""
 
-from typing import Annotated
-
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, HTTPException, status
 
 from ripcord import services
-from ripcord.db import get_session
+from ripcord.deps import SessionDep
 from ripcord.schemas import FlagCreate, FlagOut, FlagUpdate
 
 router = APIRouter(prefix="/flags", tags=["flags"])
-
-# Typed dependency alias — the Annotated form keeps Depends() out of the
-# argument default (cleaner, and avoids the flake8-bugbear B008 warning).
-SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
 
 @router.post("", response_model=FlagOut, status_code=status.HTTP_201_CREATED)
