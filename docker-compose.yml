@@ -1,0 +1,31 @@
+# Local development dependencies for Ripcord: Postgres + Redis.
+# Bring them up with:  docker compose up -d
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ripcord
+      POSTGRES_PASSWORD: ripcord
+      POSTGRES_DB: ripcord
+    ports:
+      - "5432:5432"
+    volumes:
+      - ripcord_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ripcord"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  ripcord_pgdata:
