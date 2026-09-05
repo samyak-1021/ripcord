@@ -1,14 +1,17 @@
-"""Shared pytest fixtures: an ephemeral Postgres and an HTTP client."""
+"""Shared pytest fixtures: ephemeral Postgres + Redis, and an HTTP client."""
 
 from collections.abc import AsyncGenerator, Generator
 
 import pytest
 import pytest_asyncio
+import redis.asyncio as redis
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from testcontainers.community.postgres import PostgresContainer
+from testcontainers.community.redis import RedisContainer
 
 import ripcord.models  # noqa: F401  # imported so models register on Base.metadata
+from ripcord.cache import get_redis
 from ripcord.db import Base, get_session
 from ripcord.main import create_app
 
@@ -17,15 +20,21 @@ from ripcord.main import create_app
 def postgres_url() -> Generator[str, None, None]:
     """Start one throwaway Postgres container for the whole test session."""
     with PostgresContainer("postgres:16") as postgres:
-        # Build an asyncpg URL from the container's details (the built-in
-        # helper returns a psycopg2 URL, which our async engine can't use).
         host = postgres.get_container_host_ip()
         port = postgres.get_exposed_port(5432)
-        url = (
+        yield (
             f"postgresql+asyncpg://{postgres.username}:{postgres.password}"
             f"@{host}:{port}/{postgres.dbname}"
         )
-        yield url
+
+
+@pytest.fixture(scope="session")
+def redis_url() -> Generator[str, None, None]:
+    """Start one throwaway Redis container for the whole test session."""
+    with RedisContainer("redis:7") as container:
+        host = container.get_container_host_ip()
+        port = container.get_exposed_port(6379)
+        yield f"redis://{host}:{port}/0"
 
 
 @pytest_asyncio.fixture
@@ -44,14 +53,27 @@ async def session(postgres_url: str) -> AsyncGenerator[AsyncSession, None]:
 
 
 @pytest_asyncio.fixture
-async def client(session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
-    """An HTTP client whose app uses the per-test database session."""
+async def redis_client(redis_url: str) -> AsyncGenerator[redis.Redis, None]:
+    """Yield a Redis client bound to the test container, flushed per test."""
+    client = redis.from_url(redis_url, decode_responses=True)
+    await client.flushdb()
+    yield client
+    await client.aclose()
+
+
+@pytest_asyncio.fixture
+async def client(
+    session: AsyncSession, redis_client: redis.Redis
+) -> AsyncGenerator[AsyncClient, None]:
+    """An HTTP client whose app uses the per-test Postgres and Redis."""
     app = create_app()
 
     async def _use_test_session() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
     app.dependency_overrides[get_session] = _use_test_session
+    app.dependency_overrides[get_redis] = lambda: redis_client
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as http_client:
         yield http_client
