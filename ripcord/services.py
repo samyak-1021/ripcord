@@ -1,7 +1,7 @@
 """Business logic for managing flags: CRUD, audit logging, optimistic locking.
 
 Kept separate from the HTTP layer so the same operations can be reused (e.g. by
-the real-time layer in Phase 4) and unit-tested without going through FastAPI.
+the real-time layer) and unit-tested without going through FastAPI.
 """
 
 from collections.abc import Iterable
@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import StaleDataError
 
 from ripcord.engine import Evaluation, FlagSpec, RuleSpec, evaluate
+from ripcord.logging_config import log
 from ripcord.models import AuditLog, Flag, TargetingRule
 from ripcord.schemas import FlagCreate, FlagUpdate, TargetingRuleIn
 
@@ -87,6 +88,7 @@ async def create_flag(
     except IntegrityError as exc:
         await session.rollback()
         raise DuplicateFlagError(data.key) from exc
+    log.info("flag.created", key=data.key, actor=actor)
     return await get_flag(session, data.key)
 
 
@@ -127,6 +129,7 @@ async def update_flag(
         # A concurrent writer changed the row between our read and our commit.
         await session.rollback()
         raise VersionConflictError(expected=data.version, current=None) from exc
+    log.info("flag.updated", key=key, version=flag.version, actor=actor)
     return await get_flag(session, key)
 
 
@@ -139,6 +142,7 @@ async def delete_flag(session: AsyncSession, key: str, actor: str = "system") ->
     session.add(AuditLog(flag_key=key, action="deleted", actor=actor))
     await session.delete(flag)
     await session.commit()
+    log.info("flag.deleted", key=key, actor=actor)
     return True
 
 
