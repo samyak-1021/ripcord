@@ -12,6 +12,9 @@ dependencies = [
     "alembic>=1.13",
     "redis>=5.0",
     "sse-starlette>=2.0",
+    "httpx>=0.28",              # used by the SDK client (and fastapi.testclient)
+    "structlog>=24.4",         # structured JSON logging
+    "prometheus-client>=0.21", # /metrics instrumentation
 ]
 
 # Installed with `pip install -e ".[dev]"` — kept separate so production
@@ -20,7 +23,6 @@ dependencies = [
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
-    "httpx>=0.28",                     # required by fastapi.testclient
     "testcontainers[postgres,redis]>=4.0",  # ephemeral Postgres + Redis for tests
     "psycopg2-binary>=2.9",            # sync driver testcontainers uses for readiness
     "ruff>=0.9",
