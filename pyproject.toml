@@ -7,6 +7,9 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
     "pydantic-settings>=2.6",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.30",
+    "alembic>=1.13",
 ]
 
 # Installed with `pip install -e ".[dev]"` — kept separate so production
@@ -14,7 +17,10 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3",
-    "httpx>=0.28",   # required by fastapi.testclient
+    "pytest-asyncio>=0.24",
+    "httpx>=0.28",                     # required by fastapi.testclient
+    "testcontainers[postgres]>=4.0",   # ephemeral Postgres for integration tests
+    "psycopg2-binary>=2.9",            # sync driver testcontainers uses for readiness
     "ruff>=0.9",
 ]
 
@@ -29,6 +35,8 @@ include = ["ripcord*"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# Auto-generated Alembic migrations aren't hand-linted.
+extend-exclude = ["migrations"]
 
 [tool.ruff.lint]
 # E/F = pyflakes+pycodestyle, I = import sorting, UP = pyupgrade, B = bugbear.
@@ -36,8 +44,9 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
 # Silence known third-party deprecation noise (starlette TestClient + anyio),
-# so a failing/real warning from our own code actually stands out.
+# so a real warning from our own code actually stands out.
 filterwarnings = [
     "ignore:Using `httpx` with `starlette.testclient` is deprecated",
     "ignore:The anyio.abc.BlockingPortal alias is deprecated",
