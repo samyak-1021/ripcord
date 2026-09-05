@@ -91,3 +91,26 @@ class EvaluateResponse(BaseModel):
     user_id: str
     enabled: bool
     reason: str
+
+
+class AuditEntry(BaseModel):
+    """One row of the append-only change history."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    flag_key: str
+    action: str
+    actor: str
+    details: dict | None
+    created_at: datetime
+
+
+class Stats(BaseModel):
+    """Aggregate numbers for the metrics page."""
+
+    flags_total: int
+    flags_enabled: int
+    flags_disabled: int
+    evaluations_total: int
+    evaluations_by_result: dict[str, int]

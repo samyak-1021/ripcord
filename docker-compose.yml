@@ -1,5 +1,6 @@
-# Local development dependencies for Ripcord: Postgres + Redis.
-# Bring them up with:  docker compose up -d
+# Local stack for Ripcord.
+#   docker compose up -d --build          # everything, incl. the API on :8000
+#   docker compose up -d postgres redis   # just the deps (API run on the host)
 services:
   postgres:
     image: postgres:16
@@ -26,6 +27,19 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://ripcord:ripcord@postgres:5432/ripcord
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
 volumes:
   ripcord_pgdata:

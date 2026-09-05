@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     # Redis connection string (cache + pub/sub). Wired up in Phase 4.
     redis_url: str = "redis://localhost:6379/0"
 
+    # Browser origins allowed to call the API (the dashboard). Override via the
+    # CORS_ORIGINS env var (a JSON list) in other environments.
+    cors_origins: list[str] = ["http://localhost:3000"]
+
 
 # A single shared instance imported across the app (settings are read once).
 settings = Settings()
