@@ -89,3 +89,13 @@ def test_rollout_distribution_is_approximately_uniform():
     included = sum(1 for u in users if evaluate(_flag(rollout=50), u).enabled)
     # Expect ~5000 included; the band is very wide (~6 sigma) to avoid flakiness.
     assert 4700 <= included <= 5300
+
+
+def test_eq_neq_with_empty_values_fail_closed():
+    # A rule with no values must not crash the engine (it's shared with the SDK).
+    assert not evaluate(
+        _flag(rollout=0, rules=[RuleSpec("plan", "eq", [])]), "u", {"plan": "pro"}
+    ).enabled
+    assert not evaluate(
+        _flag(rollout=0, rules=[RuleSpec("plan", "neq", [])]), "u", {"plan": "pro"}
+    ).enabled
