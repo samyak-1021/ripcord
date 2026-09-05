@@ -1,17 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { CreateFlagForm } from "@/components/CreateFlagForm";
-import { EvaluatePanel } from "@/components/EvaluatePanel";
 import { FlagCard } from "@/components/FlagCard";
 import { api, type Flag } from "@/lib/api";
 
-export default function Home() {
+export default function FlagsPage() {
   const [flags, setFlags] = useState<Flag[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [live, setLive] = useState(false);
+  const [query, setQuery] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -34,13 +34,21 @@ export default function Home() {
     return () => events.close();
   }, [load]);
 
+  const filtered = useMemo(
+    () =>
+      flags.filter((f) =>
+        `${f.key} ${f.name}`.toLowerCase().includes(query.toLowerCase()),
+      ),
+    [flags, query],
+  );
+
   return (
-    <main className="mx-auto max-w-3xl px-5 py-10">
+    <div>
       <header className="mb-8 flex items-end justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Ripcord</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Flags</h1>
           <p className="mt-1 text-sm text-neutral-500">
-            Feature flags &amp; gradual rollouts
+            {flags.length} flag{flags.length === 1 ? "" : "s"}
           </p>
         </div>
         <span className="flex items-center gap-2 text-xs text-neutral-500">
@@ -53,7 +61,15 @@ export default function Home() {
 
       <div className="flex flex-col gap-4">
         <CreateFlagForm onCreated={load} />
-        <EvaluatePanel />
+
+        {flags.length > 0 && (
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search flags…"
+            className="rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm outline-none transition focus:border-neutral-400"
+          />
+        )}
 
         {loading && <p className="text-sm text-neutral-400">Loading…</p>}
         {error && (
@@ -66,14 +82,10 @@ export default function Home() {
             No flags yet. Create one above.
           </p>
         )}
-        {flags.map((flag) => (
+        {filtered.map((flag) => (
           <FlagCard key={flag.key} flag={flag} onChanged={load} />
         ))}
       </div>
-
-      <footer className="mt-10 text-center text-xs text-neutral-400">
-        Ripcord · self-hosted feature flags
-      </footer>
-    </main>
+    </div>
   );
 }

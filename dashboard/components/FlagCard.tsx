@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { Toggle } from "@/components/Toggle";
@@ -33,23 +34,17 @@ export function FlagCard({
     }
   }
 
-  async function remove() {
-    if (!confirm(`Delete flag "${flag.key}"?`)) return;
-    setBusy(true);
-    try {
-      await api.deleteFlag(flag.key);
-      onChanged();
-    } finally {
-      setBusy(false);
-    }
-  }
-
   return (
     <div className="rounded-2xl border border-black/5 bg-white p-5 shadow-sm">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
-            <h3 className="truncate text-base font-semibold">{flag.name}</h3>
+            <Link
+              href={`/flags/${flag.key}`}
+              className="truncate text-base font-semibold hover:underline"
+            >
+              {flag.name}
+            </Link>
             <span className="rounded-full bg-neutral-100 px-2 py-0.5 font-mono text-xs text-neutral-500">
               {flag.key}
             </span>
@@ -90,14 +85,12 @@ export function FlagCard({
       {error && <p className="mt-2 text-xs text-red-500">{error}</p>}
 
       <div className="mt-4 flex justify-end">
-        <button
-          type="button"
-          onClick={remove}
-          disabled={busy}
-          className="text-xs font-medium text-red-500 transition hover:text-red-600 disabled:opacity-50"
+        <Link
+          href={`/flags/${flag.key}`}
+          className="text-xs font-medium text-neutral-500 transition hover:text-neutral-800"
         >
-          Delete
-        </button>
+          Details &amp; rules →
+        </Link>
       </div>
     </div>
   );
