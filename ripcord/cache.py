@@ -13,6 +13,7 @@ import json
 import redis.asyncio as redis
 
 from ripcord.config import settings
+from ripcord.logging_config import log
 
 # A single cache key holding the whole ruleset. Whole-ruleset granularity keeps
 # invalidation trivially correct; per-flag keys would scale better but aren't
@@ -46,8 +47,16 @@ async def write_ruleset(client: redis.Redis, payload: str) -> None:
 
 
 async def notify_flag_change(client: redis.Redis, flag_key: str, action: str) -> None:
-    """Invalidate the cached ruleset and publish a change event to subscribers."""
-    await client.delete(RULESET_KEY)
-    await client.publish(
-        CHANGES_CHANNEL, json.dumps({"flag_key": flag_key, "action": action})
-    )
+    """Invalidate the cached ruleset and publish a change event to subscribers.
+
+    Best-effort: the DB write has already committed by the time we get here, so a
+    Redis hiccup must never turn a successful change into a 500. Worst case, the
+    cache self-heals via its TTL and clients refresh on their next reconnect.
+    """
+    try:
+        await client.delete(RULESET_KEY)
+        await client.publish(
+            CHANGES_CHANNEL, json.dumps({"flag_key": flag_key, "action": action})
+        )
+    except Exception:
+        log.warning("cache.notify_failed", flag_key=flag_key, action=action)

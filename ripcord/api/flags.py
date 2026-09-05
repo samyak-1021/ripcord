@@ -60,7 +60,10 @@ async def update_flag(
 @router.delete("/{key}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_flag(key: str, session: SessionDep, redis: RedisDep) -> None:
     """Delete a flag, then broadcast the change."""
-    deleted = await services.delete_flag(session, key)
+    try:
+        deleted = await services.delete_flag(session, key)
+    except services.VersionConflictError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
     if not deleted:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Flag '{key}' not found")
     await cache.notify_flag_change(redis, key, "deleted")

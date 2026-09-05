@@ -141,7 +141,12 @@ async def delete_flag(session: AsyncSession, key: str, actor: str = "system") ->
     # Audit keys off the string, so history survives the row's deletion.
     session.add(AuditLog(flag_key=key, action="deleted", actor=actor))
     await session.delete(flag)
-    await session.commit()
+    try:
+        await session.commit()
+    except StaleDataError as exc:
+        # A concurrent writer changed the row between our read and our delete.
+        await session.rollback()
+        raise VersionConflictError(expected=flag.version, current=None) from exc
     log.info("flag.deleted", key=key, actor=actor)
     return True
 
