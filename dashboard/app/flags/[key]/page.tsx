@@ -8,7 +8,7 @@ import { AuditList } from "@/components/AuditList";
 import { EvaluatePanel } from "@/components/EvaluatePanel";
 import { RulesEditor } from "@/components/RulesEditor";
 import { Toggle } from "@/components/Toggle";
-import { api, type AuditEntry, type Flag } from "@/lib/api";
+import { api, ApiError, type AuditEntry, type Flag } from "@/lib/api";
 
 export default function FlagDetailPage() {
   const { key } = useParams<{ key: string }>();
@@ -22,13 +22,26 @@ export default function FlagDetailPage() {
   const [notFound, setNotFound] = useState(false);
 
   const load = useCallback(async () => {
+    setNotFound(false);
+    setError(null);
     try {
       const found = await api.getFlag(key);
       setFlag(found);
       setRollout(found.rollout_percentage);
+    } catch (e) {
+      // Only a real 404 means "not found"; anything else is a fetch error.
+      if (e instanceof ApiError && e.status === 404) {
+        setNotFound(true);
+      } else {
+        setError((e as Error).message);
+      }
+      return;
+    }
+    // Audit is best-effort — a failure here shouldn't hide the flag.
+    try {
       setAudit(await api.listAudit(key));
     } catch {
-      setNotFound(true);
+      setAudit([]);
     }
   }, [key]);
 
@@ -68,7 +81,22 @@ export default function FlagDetailPage() {
     );
   }
 
-  if (!flag) return <p className="text-sm text-neutral-400">Loading…</p>;
+  if (!flag) {
+    return (
+      <div>
+        <Link href="/" className="text-sm text-neutral-500 hover:underline">
+          ← Flags
+        </Link>
+        {error ? (
+          <p className="mt-8 rounded-xl bg-red-50 p-3 text-sm text-red-600">
+            Couldn&apos;t load the flag — {error}
+          </p>
+        ) : (
+          <p className="mt-8 text-sm text-neutral-400">Loading…</p>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div>

@@ -16,10 +16,10 @@ class Settings(BaseSettings):
     # Human-readable service name, surfaced by the health check and logs.
     app_name: str = "ripcord"
 
-    # Postgres connection string (async driver). Wired up in Phase 1.
+    # Postgres connection string (async driver).
     database_url: str = "postgresql+asyncpg://ripcord:ripcord@localhost:5432/ripcord"
 
-    # Redis connection string (cache + pub/sub). Wired up in Phase 4.
+    # Redis connection string (ruleset cache + pub/sub).
     redis_url: str = "redis://localhost:6379/0"
 
     # Browser origins allowed to call the API (the dashboard). Override via the

@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class Operator(StrEnum):
-    """Supported targeting-rule comparison operators (evaluated in Phase 3)."""
+    """Supported targeting-rule comparison operators."""
 
     in_ = "in"
     not_in = "not_in"

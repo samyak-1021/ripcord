@@ -104,10 +104,14 @@ class RipcordClient:
                             event = line.split(":", 1)[1].strip()
                         elif line.startswith("data:") and event == "flag-change":
                             await self.refresh()
+                        elif line == "":
+                            event = None  # blank line marks the SSE event boundary
             except Exception:
-                # Reconnect on any stream error (fail open in the meantime).
-                if self._stopped:
-                    return
+                pass  # any stream error -> fall through to the backoff below
+            # Back off before reconnecting. This runs after BOTH an error and a
+            # clean server-side stream close, so a proxy that drops idle SSE
+            # connections can never turn this into a hot reconnect loop.
+            if not self._stopped:
                 await asyncio.sleep(self._reconnect_delay)
 
     async def close(self) -> None:

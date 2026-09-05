@@ -2,8 +2,8 @@
 
 Given a flag's configuration and a user context, decide whether the flag is on
 for that user. This module has no I/O and no ORM types on purpose: it is trivial
-to unit-test, and can be reused verbatim by the client SDK in Phase 5 (which
-evaluates flags locally instead of calling the server on every check).
+to unit-test, and can be reused verbatim by the client SDK (which evaluates
+flags locally instead of calling the server on every check).
 """
 
 import hashlib
@@ -58,8 +58,8 @@ def bucket_for(flag_key: str, user_id: str) -> int:
 def _rule_matches(rule: RuleSpec, context: dict[str, str]) -> bool:
     """Return True if the user context satisfies the rule.
 
-    A missing attribute never matches — targeting is opt-in — and an unknown
-    operator fails closed rather than raising.
+    A missing attribute never matches — targeting is opt-in — and both an
+    unknown operator and a rule with no values fail closed rather than raising.
     """
     actual = context.get(rule.attribute)
     if actual is None:
@@ -69,9 +69,9 @@ def _rule_matches(rule: RuleSpec, context: dict[str, str]) -> bool:
     if rule.operator == "not_in":
         return actual not in rule.values
     if rule.operator == "eq":
-        return actual == rule.values[0]
+        return bool(rule.values) and actual == rule.values[0]
     if rule.operator == "neq":
-        return actual != rule.values[0]
+        return bool(rule.values) and actual != rule.values[0]
     return False
 
 

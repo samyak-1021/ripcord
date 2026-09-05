@@ -35,3 +35,5 @@ async def test_stats_counts_flags(client):
     assert body["flags_disabled"] == 1
     # Must be a real count, not the counter's `_created` timestamp (~1.7e9).
     assert 0 < body["evaluations_total"] < 1_000_000
+    # The per-result breakdown must be consistent with the total.
+    assert sum(body["evaluations_by_result"].values()) == body["evaluations_total"]

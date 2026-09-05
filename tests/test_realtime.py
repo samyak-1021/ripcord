@@ -62,3 +62,18 @@ async def test_stream_generator_greets_then_forwards_changes(redis_client):
         assert "z" in second["data"]
     finally:
         await events.aclose()  # clean shutdown — no dangling subscription
+
+
+async def test_update_and_delete_also_invalidate_cache(client, redis_client):
+    """Not just create — update and delete must invalidate the cached ruleset too."""
+    await client.post("/flags", json={"key": "u", "name": "U"})
+    await client.get("/ruleset")
+    assert await redis_client.get(RULESET_KEY) is not None
+
+    await client.patch("/flags/u", json={"enabled": True, "version": 1})
+    assert await redis_client.get(RULESET_KEY) is None  # update invalidated
+
+    await client.get("/ruleset")  # repopulate
+    assert await redis_client.get(RULESET_KEY) is not None
+    await client.delete("/flags/u")
+    assert await redis_client.get(RULESET_KEY) is None  # delete invalidated
