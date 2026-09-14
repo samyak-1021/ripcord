@@ -11,10 +11,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import StaleDataError
 
-from ripcord.engine import Evaluation, FlagSpec, RuleSpec, evaluate
+from ripcord import cache
+from ripcord.engine import Evaluation, FlagSpec, RuleSpec, VariantSpec, evaluate
 from ripcord.logging_config import log
-from ripcord.models import AuditLog, Flag, TargetingRule
-from ripcord.schemas import FlagCreate, FlagUpdate, TargetingRuleIn
+from ripcord.models import AuditLog, Flag, TargetingRule, Variant
+from ripcord.schemas import FlagCreate, FlagUpdate, TargetingRuleIn, VariantIn
 
 
 class DuplicateFlagError(Exception):
@@ -23,6 +24,10 @@ class DuplicateFlagError(Exception):
 
 class FlagNotFoundError(Exception):
     """Raised when a flag key does not exist."""
+
+
+class InvalidVariantError(Exception):
+    """Raised when a rule pins a variant the flag does not define."""
 
 
 class VersionConflictError(Exception):
@@ -42,8 +47,16 @@ def _rules_from_input(rules: Iterable[TargetingRuleIn]) -> list[TargetingRule]:
             operator=rule.operator.value,
             values=rule.values,
             priority=rule.priority,
+            variant=rule.variant,
         )
         for rule in rules
+    ]
+
+
+def _variants_from_input(variants: Iterable[VariantIn]) -> list[Variant]:
+    """Convert inbound schema variants into ORM Variant rows."""
+    return [
+        Variant(key=v.key, value=v.value, weight=v.weight) for v in variants
     ]
 
 
@@ -69,7 +82,9 @@ async def create_flag(
         description=data.description,
         enabled=data.enabled,
         rollout_percentage=data.rollout_percentage,
+        off_variant=data.off_variant,
         rules=_rules_from_input(data.rules),
+        variants=_variants_from_input(data.variants),
     )
     session.add(flag)
     session.add(
@@ -80,6 +95,7 @@ async def create_flag(
             details={
                 "enabled": data.enabled,
                 "rollout_percentage": data.rollout_percentage,
+                "variants": [v.key for v in data.variants] or None,
             },
         )
     )
@@ -117,8 +133,27 @@ async def update_flag(
         flag.rollout_percentage = data.rollout_percentage
         changes["rollout_percentage"] = data.rollout_percentage
     if data.rules is not None:
+        # The schema can only cross-check rules against variants when the same
+        # request replaces both. A PATCH that edits rules alone (the common
+        # case from the dashboard) has to be checked against the variants
+        # already stored, which only the service layer can see.
+        if data.variants is None:
+            known = {v.key for v in flag.variants}
+            unknown = sorted(
+                {r.variant for r in data.rules if r.variant and r.variant not in known}
+            )
+            if unknown:
+                raise InvalidVariantError(
+                    f"rule pins unknown variant(s): {', '.join(unknown)}"
+                    + (f"; defined: {', '.join(sorted(known))}" if known else "")
+                )
         flag.rules = _rules_from_input(data.rules)
         changes["rules"] = len(data.rules)
+    if data.variants is not None:
+        flag.variants = _variants_from_input(data.variants)
+        flag.off_variant = data.off_variant
+        changes["variants"] = [v.key for v in data.variants]
+        changes["off_variant"] = data.off_variant
 
     # Bump the version ourselves; SQLAlchemy adds the WHERE-version guard.
     flag.version += 1
@@ -152,14 +187,24 @@ async def delete_flag(session: AsyncSession, key: str, actor: str = "system") ->
 
 
 def _to_spec(flag: Flag) -> FlagSpec:
-    """Project an ORM Flag (with its rules) into an engine FlagSpec."""
+    """Project an ORM Flag (with its rules and variants) into an engine FlagSpec."""
     return FlagSpec(
         key=flag.key,
         enabled=flag.enabled,
         rollout_percentage=flag.rollout_percentage,
+        off_variant=flag.off_variant,
         rules=[
-            RuleSpec(attribute=r.attribute, operator=r.operator, values=list(r.values))
+            RuleSpec(
+                attribute=r.attribute,
+                operator=r.operator,
+                values=list(r.values),
+                variant=r.variant,
+            )
             for r in flag.rules
+        ],
+        variants=[
+            VariantSpec(key=v.key, value=v.value, weight=v.weight)
+            for v in flag.variants
         ],
     )
 
@@ -197,3 +242,85 @@ async def compute_stats(session: AsyncSession) -> dict[str, int]:
         "flags_enabled": enabled,
         "flags_disabled": len(flags) - enabled,
     }
+
+
+def flag_payload(flag: Flag) -> str:
+    """Serialise one flag to the JSON shape both the cache and /ruleset use."""
+    from ripcord.schemas import FlagOut
+
+    return FlagOut.model_validate(flag).model_dump_json()
+
+
+async def build_ruleset_mapping(session: AsyncSession) -> dict[str, str]:
+    """Every flag as ``{key: json}`` — the exact shape of the Redis hash."""
+    flags = await list_flags(session)
+    return {flag.key: flag_payload(flag) for flag in flags}
+
+
+def spec_from_payload(payload: str) -> FlagSpec:
+    """Rebuild an engine FlagSpec from a cached flag's JSON.
+
+    Deliberately tolerant: missing optional keys fall back to defaults so an
+    entry cached by an older build is still evaluable rather than a 500.
+    """
+    import json
+
+    data = json.loads(payload)
+    return FlagSpec(
+        key=data["key"],
+        enabled=data["enabled"],
+        rollout_percentage=data["rollout_percentage"],
+        off_variant=data.get("off_variant"),
+        rules=[
+            RuleSpec(
+                attribute=r["attribute"],
+                operator=r["operator"],
+                values=list(r["values"]),
+                variant=r.get("variant"),
+            )
+            for r in data.get("rules", [])
+        ],
+        variants=[
+            VariantSpec(key=v["key"], value=v.get("value"), weight=v["weight"])
+            for v in data.get("variants", [])
+        ],
+    )
+
+
+async def evaluate_flag_cached(
+    session: AsyncSession,
+    redis_client,
+    key: str,
+    user_id: str,
+    context: dict[str, str] | None = None,
+) -> Evaluation:
+    """Evaluate a flag, serving the ruleset from Redis instead of Postgres.
+
+    This is the hot path. Previously every ``/evaluate`` call did a database
+    lookup; now it is a single ``HGET``, with the database touched only to
+    repopulate a cold cache. If Redis itself is unreachable we fall back to the
+    database rather than failing the request — a degraded cache must not become
+    an outage.
+    """
+    try:
+        cached = await cache.read_flag(redis_client, key)
+    except Exception:
+        log.warning("cache.read_failed", flag_key=key, fallback="database")
+        cached = None
+
+    if isinstance(cached, str):
+        return evaluate(spec_from_payload(cached), user_id, context)
+    if cached is False:
+        # Cache is authoritative and has no such flag.
+        return Evaluation(enabled=False, reason="flag_not_found")
+
+    # Cold cache: rebuild it from the database, then answer from what we built.
+    mapping = await build_ruleset_mapping(session)
+    try:
+        await cache.write_ruleset(redis_client, mapping)
+    except Exception:
+        log.warning("cache.write_failed", flag_key=key)
+    payload = mapping.get(key)
+    if payload is None:
+        return Evaluation(enabled=False, reason="flag_not_found")
+    return evaluate(spec_from_payload(payload), user_id, context)

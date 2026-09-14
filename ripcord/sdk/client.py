@@ -19,7 +19,7 @@ import asyncio
 
 import httpx
 
-from ripcord.engine import FlagSpec, RuleSpec, evaluate
+from ripcord.engine import FlagSpec, RuleSpec, VariantSpec, evaluate
 from ripcord.logging_config import log
 
 
@@ -29,9 +29,19 @@ def _spec_from_json(data: dict) -> FlagSpec:
         key=data["key"],
         enabled=data["enabled"],
         rollout_percentage=data["rollout_percentage"],
+        off_variant=data.get("off_variant"),
         rules=[
-            RuleSpec(attribute=r["attribute"], operator=r["operator"], values=r["values"])
+            RuleSpec(
+                attribute=r["attribute"],
+                operator=r["operator"],
+                values=r["values"],
+                variant=r.get("variant"),
+            )
             for r in data["rules"]
+        ],
+        variants=[
+            VariantSpec(key=v["key"], value=v.get("value"), weight=v["weight"])
+            for v in data.get("variants", [])
         ],
     )
 
@@ -43,14 +53,21 @@ class RipcordClient:
         self,
         base_url: str | None = None,
         *,
+        api_key: str | None = None,
         http_client: httpx.AsyncClient | None = None,
         reconnect_delay: float = 1.0,
     ) -> None:
+        # The SDK only ever needs the `sdk` scope: it reads /ruleset and holds
+        # /stream open. Shipping a `flags:write` key inside an application
+        # binary would defeat the purpose of authenticating at all.
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         if http_client is not None:
             self._http = http_client
+            if api_key:
+                self._http.headers.update(headers)
             self._owns_http = False
         elif base_url is not None:
-            self._http = httpx.AsyncClient(base_url=base_url)
+            self._http = httpx.AsyncClient(base_url=base_url, headers=headers)
             self._owns_http = True
         else:
             raise ValueError("provide either base_url or http_client")
@@ -69,6 +86,16 @@ class RipcordClient:
         """Re-fetch the ruleset. On failure keep the last-known-good copy."""
         try:
             response = await self._http.get("/ruleset")
+            if response.status_code in (401, 403):
+                # A bad credential is an operator error, not a transient blip —
+                # it will not fix itself on the next poll. Say so loudly, then
+                # still fail open so the caller's app keeps serving traffic.
+                log.error(
+                    "ripcord.auth_failed",
+                    status=response.status_code,
+                    detail="check the SDK api_key and that it has the 'sdk' scope",
+                )
+                return
             response.raise_for_status()
             self._flags = {
                 item["key"]: _spec_from_json(item) for item in response.json()
@@ -90,6 +117,40 @@ class RipcordClient:
         if spec is None:
             return default
         return evaluate(spec, user_id, context).enabled
+
+    def variant(
+        self,
+        flag_key: str,
+        user_id: str,
+        context: dict[str, str] | None = None,
+        *,
+        default: str | None = None,
+    ) -> str | None:
+        """Return the variant key served to this user, or ``default``."""
+        spec = self._flags.get(flag_key)
+        if spec is None:
+            return default
+        result = evaluate(spec, user_id, context)
+        return result.variant if result.variant is not None else default
+
+    def value(
+        self,
+        flag_key: str,
+        user_id: str,
+        context: dict[str, str] | None = None,
+        *,
+        default=None,
+    ):
+        """Return the served variant's payload, or ``default``.
+
+        This is the multivariate analogue of ``is_enabled``: instead of a
+        boolean you get whatever config the winning variant carries.
+        """
+        spec = self._flags.get(flag_key)
+        if spec is None:
+            return default
+        result = evaluate(spec, user_id, context)
+        return result.value if result.variant is not None else default
 
     async def _watch(self) -> None:
         """Hold an SSE connection open and refresh on every change event."""

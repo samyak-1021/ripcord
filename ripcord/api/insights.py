@@ -3,7 +3,7 @@
 from fastapi import APIRouter
 
 from ripcord import services
-from ripcord.deps import SessionDep
+from ripcord.deps import ReadDep, SessionDep
 from ripcord.metrics import evaluation_counts
 from ripcord.schemas import AuditEntry, Stats
 
@@ -12,14 +12,17 @@ router = APIRouter(tags=["insights"])
 
 @router.get("/audit", response_model=list[AuditEntry])
 async def get_audit(
-    session: SessionDep, flag_key: str | None = None, limit: int = 100
+    principal: ReadDep,
+    session: SessionDep,
+    flag_key: str | None = None,
+    limit: int = 100,
 ) -> list[AuditEntry]:
     """Return recent change history, newest first (optionally for one flag)."""
     return await services.list_audit(session, flag_key=flag_key, limit=limit)
 
 
 @router.get("/stats", response_model=Stats)
-async def get_stats(session: SessionDep) -> Stats:
+async def get_stats(principal: ReadDep, session: SessionDep) -> Stats:
     """Aggregate flag counts + evaluation totals for the metrics page."""
     base = await services.compute_stats(session)
     counts = evaluation_counts()

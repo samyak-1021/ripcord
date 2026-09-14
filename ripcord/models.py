@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, ForeignKey, String, func
+from sqlalchemy import CheckConstraint, ForeignKey, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import DateTime
@@ -31,6 +31,9 @@ class Flag(Base):
     enabled: Mapped[bool] = mapped_column(default=False)
     # Percentage of otherwise-unmatched users who receive the flag (0..100).
     rollout_percentage: Mapped[int] = mapped_column(default=0)
+    # On a multivariate flag, which variant to serve when the flag is off or
+    # the user falls outside the rollout. None = serve nothing (boolean flag).
+    off_variant: Mapped[str | None] = mapped_column(String(64), default=None)
     # Optimistic-locking counter. We bump it ourselves on every update, and
     # `version_id_col` below makes SQLAlchemy add a `WHERE version = :old`
     # guard to each UPDATE/DELETE — so a concurrent writer's stale change is
@@ -54,6 +57,13 @@ class Flag(Base):
         lazy="selectin",
     )
 
+    variants: Mapped[list["Variant"]] = relationship(
+        back_populates="flag",
+        cascade="all, delete-orphan",
+        order_by="Variant.key",
+        lazy="selectin",
+    )
+
 
 class TargetingRule(Base):
     """An attribute-based rule attached to a flag (e.g. country in [IN, US])."""
@@ -72,8 +82,44 @@ class TargetingRule(Base):
     values: Mapped[list[str]] = mapped_column(JSONB)
     # Lower priority numbers are evaluated first.
     priority: Mapped[int] = mapped_column(default=0)
+    # On a multivariate flag, a matching rule may pin a specific variant
+    # ("users in IN get blue"). None means "just turn it on".
+    variant: Mapped[str | None] = mapped_column(String(64), default=None)
 
     flag: Mapped["Flag"] = relationship(back_populates="rules")
+
+
+class Variant(Base):
+    """One arm of a multivariate flag.
+
+    A flag with no variants is a plain boolean flag — the two shapes share the
+    same table and the same evaluation engine, so there is no second code path
+    to keep in sync.
+    """
+
+    __tablename__ = "variants"
+    __table_args__ = (
+        # A variant key is only meaningful within its flag.
+        UniqueConstraint("flag_id", "key", name="uq_variants_flag_key"),
+        CheckConstraint(
+            "weight >= 0 AND weight <= 100", name="ck_variants_weight"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    flag_id: Mapped[int] = mapped_column(
+        ForeignKey("flags.id", ondelete="CASCADE"), index=True
+    )
+    # Identifier used by rules and returned in evaluations, e.g. "control".
+    key: Mapped[str] = mapped_column(String(64))
+    # Arbitrary JSON payload served to the user. The engine never inspects it.
+    value: Mapped[dict | list | str | int | float | bool | None] = mapped_column(
+        JSONB, default=None
+    )
+    # Share of rollout-included traffic, 0..100. Weights across a flag sum to 100.
+    weight: Mapped[int] = mapped_column(default=0)
+
+    flag: Mapped["Flag"] = relationship(back_populates="variants")
 
 
 class AuditLog(Base):
@@ -91,4 +137,38 @@ class AuditLog(Base):
     details: Mapped[dict | None] = mapped_column(JSONB, default=None)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+
+class ApiKey(Base):
+    """A credential for the management API, stored as a digest of its secret.
+
+    Only the ``key_id`` half of a key is stored in plaintext (so lookup is an
+    indexed hit); the secret half exists in plaintext exactly once, at creation
+    time, and is never recoverable afterwards. See ``ripcord.auth`` for the
+    format and the reasoning behind the hash choice.
+    """
+
+    __tablename__ = "api_keys"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # Public half of the key — safe to log, index, and show in a UI.
+    key_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    # SHA-256 digest of the secret half. Never the secret itself.
+    secret_hash: Mapped[str] = mapped_column(String(64))
+    # Human label, e.g. "ci-deploy" or "checkout-service". Becomes the audit actor.
+    name: Mapped[str] = mapped_column(String(128))
+    # Granted scopes, e.g. ["flags:read", "sdk"].
+    scopes: Mapped[list[str]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    # Refreshed lazily (see auth._LAST_USED_REFRESH) so reads stay reads.
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    # Revocation is a tombstone, not a delete: the audit log references the
+    # key's name, and "when was this key turned off" is worth keeping.
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
     )

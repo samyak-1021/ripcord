@@ -1,9 +1,16 @@
-"""Tests for the Redis-backed ruleset cache and the pub/sub change stream."""
+"""Tests for the Redis-backed ruleset cache and the pub/sub change stream.
+
+The cache is a Redis **hash** (one field per flag, plus a reserved completeness
+marker), not a single JSON blob. That shape is what lets `/evaluate` answer with
+one `HGET` and lets a single flag change invalidate a single field — so these
+tests assert per-flag invalidation, and that a partially-populated hash is never
+mistaken for an authoritative empty one.
+"""
 
 import asyncio
 
 from ripcord.api.realtime import flag_change_events
-from ripcord.cache import CHANGES_CHANNEL, RULESET_KEY
+from ripcord.cache import CHANGES_CHANNEL, COMPLETE_FIELD, RULESET_KEY
 
 
 async def test_ruleset_returns_flags(client):
@@ -14,17 +21,127 @@ async def test_ruleset_returns_flags(client):
     assert [f["key"] for f in resp.json()] == ["a"]
 
 
-async def test_ruleset_is_cached_then_invalidated(client, redis_client):
-    """A read populates the cache; a mutation invalidates it."""
+async def test_ruleset_read_populates_a_complete_cache(client, redis_client):
+    """A read builds the hash and marks it authoritative."""
     await client.post("/flags", json={"key": "a", "name": "A"})
     await client.get("/ruleset")
-    assert await redis_client.get(RULESET_KEY) is not None  # cached
+
+    assert await redis_client.type(RULESET_KEY) == "hash"
+    assert await redis_client.hexists(RULESET_KEY, COMPLETE_FIELD)
+    assert await redis_client.hexists(RULESET_KEY, "a")
+    # The cache must expire on its own even if an invalidation were ever missed.
+    assert await redis_client.ttl(RULESET_KEY) > 0
+
+
+async def test_create_updates_one_field_and_keeps_the_cache_warm(
+    client, redis_client
+):
+    """The point of per-flag invalidation: one change doesn't cold-start the rest."""
+    await client.post("/flags", json={"key": "a", "name": "A"})
+    await client.get("/ruleset")  # populate
 
     await client.post("/flags", json={"key": "b", "name": "B"})
-    assert await redis_client.get(RULESET_KEY) is None  # invalidated
 
-    resp = await client.get("/ruleset")  # rebuilt from DB
-    assert [f["key"] for f in resp.json()] == ["a", "b"]
+    # 'a' is untouched and still cached; 'b' was added in place.
+    assert await redis_client.hexists(RULESET_KEY, "a")
+    assert await redis_client.hexists(RULESET_KEY, "b")
+    assert await redis_client.hexists(RULESET_KEY, COMPLETE_FIELD)
+
+    resp = await client.get("/ruleset")
+    assert sorted(f["key"] for f in resp.json()) == ["a", "b"]
+
+
+async def test_update_rewrites_the_cached_field(client, redis_client):
+    await client.post("/flags", json={"key": "u", "name": "U"})
+    await client.get("/ruleset")
+    assert '"enabled":false' in (await redis_client.hget(RULESET_KEY, "u")).replace(
+        ": ", ":"
+    )
+
+    await client.patch("/flags/u", json={"enabled": True, "version": 1})
+
+    cached = (await redis_client.hget(RULESET_KEY, "u")).replace(": ", ":")
+    assert '"enabled":true' in cached
+
+
+async def test_delete_removes_the_cached_field(client, redis_client):
+    await client.post("/flags", json={"key": "d", "name": "D"})
+    await client.get("/ruleset")
+    assert await redis_client.hexists(RULESET_KEY, "d")
+
+    await client.delete("/flags/d")
+
+    assert not await redis_client.hexists(RULESET_KEY, "d")
+    assert [f["key"] for f in (await client.get("/ruleset")).json()] == []
+
+
+async def test_partial_cache_is_not_treated_as_authoritative(client, redis_client):
+    """A hash with no completeness marker must trigger a rebuild, not an empty read.
+
+    This is the failure mode the reserved marker field exists to prevent:
+    without it, a hash holding one flag would look like "the ruleset has exactly
+    one flag" and the others would silently vanish from /ruleset.
+    """
+    await client.post("/flags", json={"key": "p1", "name": "P1"})
+    await client.post("/flags", json={"key": "p2", "name": "P2"})
+    # Simulate a cold cache that a single flag-change wrote one field into.
+    await redis_client.delete(RULESET_KEY)
+    await redis_client.hset(RULESET_KEY, "p1", '{"key": "p1"}')
+
+    resp = await client.get("/ruleset")
+    assert sorted(f["key"] for f in resp.json()) == ["p1", "p2"]
+    assert await redis_client.hexists(RULESET_KEY, COMPLETE_FIELD)
+
+
+async def test_evaluate_is_served_from_cache_without_touching_the_db(
+    client, redis_client
+):
+    """The hot path must not hit Postgres once the cache is warm."""
+    await client.post(
+        "/flags",
+        json={"key": "hot", "name": "Hot", "enabled": True, "rollout_percentage": 100},
+    )
+    await client.get("/ruleset")  # warm
+
+    # Corrupt the cached entry to prove the answer really came from Redis.
+    await redis_client.hset(
+        RULESET_KEY,
+        "hot",
+        '{"key": "hot", "enabled": false, "rollout_percentage": 0, '
+        '"rules": [], "variants": []}',
+    )
+    resp = await client.post(
+        "/evaluate", json={"flag_key": "hot", "user_id": "u1", "context": {}}
+    )
+    assert resp.json()["enabled"] is False, "/evaluate did not read from the cache"
+
+
+async def test_evaluate_falls_back_to_the_database_on_a_cold_cache(
+    client, redis_client
+):
+    await client.post(
+        "/flags",
+        json={"key": "cold", "name": "Cold", "enabled": True, "rollout_percentage": 100},
+    )
+    await redis_client.delete(RULESET_KEY)
+
+    resp = await client.post(
+        "/evaluate", json={"flag_key": "cold", "user_id": "u1", "context": {}}
+    )
+    assert resp.json()["enabled"] is True
+    # ...and the miss repopulated the cache for the next caller.
+    assert await redis_client.hexists(RULESET_KEY, COMPLETE_FIELD)
+
+
+async def test_evaluate_unknown_flag_is_fail_safe_from_cache(client, redis_client):
+    await client.post("/flags", json={"key": "known", "name": "Known"})
+    await client.get("/ruleset")
+
+    resp = await client.post(
+        "/evaluate", json={"flag_key": "ghost", "user_id": "u1", "context": {}}
+    )
+    assert resp.json()["enabled"] is False
+    assert resp.json()["reason"] == "flag_not_found"
 
 
 async def test_mutation_publishes_change_event(client, redis_client):
@@ -53,7 +170,6 @@ async def test_stream_generator_greets_then_forwards_changes(redis_client):
         first = await events.__anext__()
         assert first == {"event": "connected", "data": "ok"}
 
-        # A change published on the channel is forwarded as the next event.
         await redis_client.publish(
             CHANGES_CHANNEL, '{"flag_key": "z", "action": "created"}'
         )
@@ -62,18 +178,3 @@ async def test_stream_generator_greets_then_forwards_changes(redis_client):
         assert "z" in second["data"]
     finally:
         await events.aclose()  # clean shutdown — no dangling subscription
-
-
-async def test_update_and_delete_also_invalidate_cache(client, redis_client):
-    """Not just create — update and delete must invalidate the cached ruleset too."""
-    await client.post("/flags", json={"key": "u", "name": "U"})
-    await client.get("/ruleset")
-    assert await redis_client.get(RULESET_KEY) is not None
-
-    await client.patch("/flags/u", json={"enabled": True, "version": 1})
-    assert await redis_client.get(RULESET_KEY) is None  # update invalidated
-
-    await client.get("/ruleset")  # repopulate
-    assert await redis_client.get(RULESET_KEY) is not None
-    await client.delete("/flags/u")
-    assert await redis_client.get(RULESET_KEY) is None  # delete invalidated

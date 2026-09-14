@@ -8,9 +8,10 @@ from ripcord.api.evaluate import router as evaluate_router
 from ripcord.api.flags import router as flags_router
 from ripcord.api.health import router as health_router
 from ripcord.api.insights import router as insights_router
+from ripcord.api.keys import router as keys_router
 from ripcord.api.realtime import router as realtime_router
 from ripcord.config import settings
-from ripcord.logging_config import configure_logging
+from ripcord.logging_config import configure_logging, log
 
 
 def create_app() -> FastAPI:
@@ -21,6 +22,14 @@ def create_app() -> FastAPI:
     mount new feature routers as the project grows.
     """
     configure_logging()
+
+    if not settings.auth_enabled:
+        # Loud on purpose. An open write API on a flag service means anyone who
+        # can reach the port can kill a feature in production.
+        log.warning(
+            "auth.disabled",
+            detail="AUTH_ENABLED=false - the management API is unauthenticated",
+        )
 
     app = FastAPI(
         title="Ripcord",
@@ -45,6 +54,7 @@ def create_app() -> FastAPI:
     app.include_router(evaluate_router)
     app.include_router(realtime_router)
     app.include_router(insights_router)
+    app.include_router(keys_router)
 
     return app
 

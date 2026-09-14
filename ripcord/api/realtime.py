@@ -1,6 +1,5 @@
 """Real-time flag distribution: a cached ruleset endpoint and an SSE stream."""
 
-import json
 from collections.abc import AsyncGenerator
 
 import redis.asyncio as redis
@@ -8,14 +7,16 @@ from fastapi import APIRouter, Response
 from sse_starlette.sse import EventSourceResponse
 
 from ripcord import cache, services
-from ripcord.deps import RedisDep, SessionDep
+from ripcord.deps import RedisDep, SdkDep, SessionDep, StreamDep
 from ripcord.schemas import FlagOut
 
 router = APIRouter(tags=["realtime"])
 
 
 @router.get("/ruleset", response_model=list[FlagOut])
-async def get_ruleset(session: SessionDep, redis_client: RedisDep) -> Response:
+async def get_ruleset(
+    principal: SdkDep, session: SessionDep, redis_client: RedisDep
+) -> Response:
     """Return every flag (for SDK bootstrap), served from a Redis cache.
 
     Cache-aside: serve the cached JSON if present; otherwise load from Postgres,
@@ -23,14 +24,18 @@ async def get_ruleset(session: SessionDep, redis_client: RedisDep) -> Response:
     """
     cached = await cache.read_ruleset(redis_client)
     if cached is not None:
-        return Response(content=cached, media_type="application/json")
+        # Each entry is already-serialised JSON; splicing them avoids a
+        # parse-then-reserialise round trip just to answer a read.
+        return Response(
+            content="[" + ",".join(cached) + "]", media_type="application/json"
+        )
 
-    flags = await services.list_flags(session)
-    payload = json.dumps(
-        [FlagOut.model_validate(f).model_dump(mode="json") for f in flags]
+    mapping = await services.build_ruleset_mapping(session)
+    await cache.write_ruleset(redis_client, mapping)
+    return Response(
+        content="[" + ",".join(mapping.values()) + "]",
+        media_type="application/json",
     )
-    await cache.write_ruleset(redis_client, payload)
-    return Response(content=payload, media_type="application/json")
 
 
 async def flag_change_events(client: redis.Redis) -> AsyncGenerator[dict, None]:
@@ -55,7 +60,9 @@ async def flag_change_events(client: redis.Redis) -> AsyncGenerator[dict, None]:
 
 
 @router.get("/stream")
-async def stream(redis_client: RedisDep) -> EventSourceResponse:
+async def stream(
+    principal: StreamDep, redis_client: RedisDep
+) -> EventSourceResponse:
     """Server-Sent Events: emit a 'flag-change' event whenever a flag changes.
 
     Every server subscribes to the same Redis channel, so a change made on any

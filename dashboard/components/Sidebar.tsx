@@ -3,10 +3,13 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
+import { SignOutButton } from "@/components/AuthGate";
+
 const links = [
   { href: "/", label: "Flags" },
   { href: "/audit", label: "Audit log" },
   { href: "/metrics", label: "Metrics" },
+  { href: "/keys", label: "API keys" },
 ];
 
 export function Sidebar() {
@@ -18,7 +21,7 @@ export function Sidebar() {
       : pathname.startsWith(href);
 
   return (
-    <aside className="w-56 shrink-0 border-r border-black/5 bg-white/70 px-4 py-6">
+    <aside className="flex w-56 shrink-0 flex-col border-r border-black/5 bg-white/70 px-4 py-6">
       <div className="px-2">
         <div className="text-lg font-semibold tracking-tight">Ripcord</div>
         <div className="text-xs text-neutral-400">feature flags</div>
@@ -38,6 +41,9 @@ export function Sidebar() {
           </Link>
         ))}
       </nav>
+      <div className="mt-auto px-3 pt-6">
+        <SignOutButton />
+      </div>
     </aside>
   );
 }

@@ -10,13 +10,19 @@ const inputClass =
 
 // The editor works on a "draft" where values are a single comma-separated
 // string (easy to type); we split it into a list on save.
-type DraftRule = { attribute: string; operator: string; values: string };
+type DraftRule = {
+  attribute: string;
+  operator: string;
+  values: string;
+  variant: string;
+};
 
 const toDraft = (rules: Rule[]): DraftRule[] =>
   rules.map((r) => ({
     attribute: r.attribute,
     operator: r.operator,
     values: r.values.join(", "),
+    variant: r.variant ?? "",
   }));
 
 export function RulesEditor({
@@ -40,7 +46,10 @@ export function RulesEditor({
   const update = (i: number, patch: Partial<DraftRule>) =>
     setRules((rs) => rs.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
   const add = () =>
-    setRules((rs) => [...rs, { attribute: "", operator: "in", values: "" }]);
+    setRules((rs) => [
+      ...rs,
+      { attribute: "", operator: "in", values: "", variant: "" },
+    ]);
   const remove = (i: number) =>
     setRules((rs) => rs.filter((_, idx) => idx !== i));
 
@@ -58,6 +67,7 @@ export function RulesEditor({
             .map((v) => v.trim())
             .filter(Boolean),
           priority: idx,
+          variant: r.variant || null,
         }));
       await api.updateFlag(flag.key, { version: flag.version, rules: payload });
       onSaved();
@@ -82,6 +92,8 @@ export function RulesEditor({
       </div>
       <p className="mt-1 text-xs text-neutral-400">
         A matching rule turns the flag on for that user, regardless of rollout.
+        {flag.variants.length > 0 &&
+          " On a multivariate flag it can also pin a specific variant."}
       </p>
 
       <div className="mt-4 flex flex-col gap-3">
@@ -115,6 +127,21 @@ export function RulesEditor({
               placeholder="values (comma-separated)"
               className={`flex-1 ${inputClass}`}
             />
+            {flag.variants.length > 0 && (
+              <select
+                value={rule.variant}
+                onChange={(e) => update(i, { variant: e.target.value })}
+                className={inputClass}
+                aria-label="Pinned variant"
+              >
+                <option value="">any variant</option>
+                {flag.variants.map((v) => (
+                  <option key={v.key} value={v.key}>
+                    → {v.key}
+                  </option>
+                ))}
+              </select>
+            )}
             <button
               type="button"
               onClick={() => remove(i)}

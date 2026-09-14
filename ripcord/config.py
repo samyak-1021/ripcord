@@ -26,6 +26,17 @@ class Settings(BaseSettings):
     # CORS_ORIGINS env var (a JSON list) in other environments.
     cors_origins: list[str] = ["http://localhost:3000"]
 
+    # API-key auth on the management + SDK endpoints. Defaults to ON: a flag
+    # service with an open write API is a production incident waiting to happen,
+    # so turning it off has to be a deliberate act (and logs a loud warning).
+    auth_enabled: bool = True
+
+    # A single admin key accepted without a database lookup. This exists to
+    # solve the bootstrap problem — you need a key to mint the first key — and
+    # for ephemeral environments like CI. Leave it unset in production once a
+    # real admin key has been created.
+    bootstrap_admin_key: str | None = None
+
 
 # A single shared instance imported across the app (settings are read once).
 settings = Settings()

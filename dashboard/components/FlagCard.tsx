@@ -52,7 +52,21 @@ export function FlagCard({
           <p className="mt-1 text-xs text-neutral-400">
             v{flag.version} · {flag.rules.length} rule
             {flag.rules.length === 1 ? "" : "s"}
+            {flag.variants.length > 0 &&
+              ` · ${flag.variants.length} variants`}
           </p>
+          {flag.variants.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1">
+              {flag.variants.map((v) => (
+                <span
+                  key={v.key}
+                  className="rounded-full bg-blue-50 px-2 py-0.5 font-mono text-[11px] text-blue-700"
+                >
+                  {v.key} {v.weight}%
+                </span>
+              ))}
+            </div>
+          )}
         </div>
         <Toggle
           checked={flag.enabled}

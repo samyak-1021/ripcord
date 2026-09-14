@@ -83,8 +83,9 @@ async def test_sdk_fails_open_when_server_unreachable():
 
 
 class _FakeRulesetResponse:
-    def __init__(self, flags):
+    def __init__(self, flags, status_code: int = 200):
         self._flags = flags
+        self.status_code = status_code
 
     def raise_for_status(self):
         pass
@@ -132,6 +133,20 @@ class _FakeHTTP:
         )
 
 
+class _UnauthorizedHTTP:
+    """Always 401 — the SDK must fail open, not raise, on a bad credential."""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def get(self, url):
+        self.calls += 1
+        return _FakeRulesetResponse([], status_code=401)
+
+    def stream(self, method, url, **kwargs):
+        return _FakeStream([])
+
+
 async def test_sdk_watch_auto_refreshes_on_sse_event():
     """watch=True: a 'flag-change' SSE event triggers a local refresh."""
     sdk = RipcordClient(http_client=_FakeHTTP())
@@ -143,5 +158,26 @@ async def test_sdk_watch_auto_refreshes_on_sse_event():
                 break
             await asyncio.sleep(0.02)
         assert sdk.is_enabled("f", "u1") is True  # SSE event drove the refresh
+    finally:
+        await sdk.close()
+
+
+async def test_sdk_fails_open_on_rejected_credential():
+    """A 401 must not crash the caller's app, and must not poison the cache."""
+    sdk = RipcordClient(http_client=_UnauthorizedHTTP())
+    await sdk.start(watch=False)
+    try:
+        # Fail open: the caller's default is served, no exception escapes.
+        assert sdk.is_enabled("anything", "u1") is False
+        assert sdk.is_enabled("anything", "u1", default=True) is True
+    finally:
+        await sdk.close()
+
+
+async def test_sdk_sends_its_api_key():
+    """The SDK attaches the configured key to every request it makes."""
+    sdk = RipcordClient(base_url="http://example.invalid", api_key="rpc_abc123_secret")
+    try:
+        assert sdk._http.headers["Authorization"] == "Bearer rpc_abc123_secret"
     finally:
         await sdk.close()

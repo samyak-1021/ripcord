@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState } from "react";
 import { AuditList } from "@/components/AuditList";
 import { EvaluatePanel } from "@/components/EvaluatePanel";
 import { RulesEditor } from "@/components/RulesEditor";
+import { VariantsEditor } from "@/components/VariantsEditor";
 import { Toggle } from "@/components/Toggle";
 import { api, ApiError, type AuditEntry, type Flag } from "@/lib/api";
 
@@ -141,6 +142,7 @@ export default function FlagDetailPage() {
           {error && <p className="mt-2 text-xs text-red-500">{error}</p>}
         </section>
 
+        <VariantsEditor flag={flag} onSaved={load} />
         <RulesEditor flag={flag} onSaved={load} />
         <EvaluatePanel flagKey={flag.key} />
 

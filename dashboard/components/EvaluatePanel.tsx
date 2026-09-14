@@ -76,7 +76,7 @@ export function EvaluatePanel({ flagKey }: { flagKey?: string }) {
           Evaluate
         </button>
         {result && (
-          <span className="text-sm">
+          <span className="flex flex-wrap items-center gap-2 text-sm">
             <span
               className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
                 result.enabled
@@ -86,7 +86,17 @@ export function EvaluatePanel({ flagKey }: { flagKey?: string }) {
             >
               {result.enabled ? "ON" : "OFF"}
             </span>
-            <span className="ml-2 font-mono text-xs text-neutral-500">
+            {result.variant && (
+              <span className="rounded-full bg-blue-100 px-2 py-0.5 font-mono text-xs font-semibold text-blue-700">
+                {result.variant}
+              </span>
+            )}
+            {result.value !== null && result.value !== undefined && (
+              <code className="rounded bg-neutral-100 px-1.5 py-0.5 font-mono text-xs text-neutral-600">
+                {JSON.stringify(result.value)}
+              </code>
+            )}
+            <span className="font-mono text-xs text-neutral-500">
               {result.reason}
             </span>
           </span>
