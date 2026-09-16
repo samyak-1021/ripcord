@@ -181,11 +181,29 @@ class FlagOut(BaseModel):
 
 
 class EvaluateRequest(BaseModel):
-    """Request to evaluate one flag for a given user + attribute context."""
+    """Request to evaluate one flag for a given user + attribute context.
 
-    flag_key: str
-    user_id: str
-    context: dict[str, str] = Field(default_factory=dict)
+    Every field is bounded. This is the one unauthenticated-by-volume endpoint —
+    an SDK calls it on every evaluation — and without limits a single request
+    could carry a megabyte of `user_id` to be MD5'd and thousands of context
+    entries to be held in memory and walked once per rule. The caps are far
+    above any legitimate use and far below anything that hurts.
+    """
+
+    flag_key: str = Field(min_length=1, max_length=128)
+    user_id: str = Field(min_length=1, max_length=256)
+    context: dict[str, str] = Field(default_factory=dict, max_length=64)
+
+    @field_validator("context")
+    @classmethod
+    def _bound_context_entries(cls, value: dict[str, str]) -> dict[str, str]:
+        for key, entry in value.items():
+            if len(key) > 128 or len(entry) > 512:
+                raise ValueError(
+                    f"context entry '{key[:32]}' exceeds the size limit "
+                    "(128-char keys, 512-char values)"
+                )
+        return value
 
 
 class EvaluateResponse(BaseModel):

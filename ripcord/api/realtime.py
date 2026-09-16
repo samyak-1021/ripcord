@@ -30,8 +30,12 @@ async def get_ruleset(
             content="[" + ",".join(cached) + "]", media_type="application/json"
         )
 
+    # Read the change counter before the query, not after — see write_ruleset.
+    # The response is served from `mapping` either way, so a superseded publish
+    # costs this caller nothing.
+    epoch = await cache.read_epoch(redis_client)
     mapping = await services.build_ruleset_mapping(session)
-    await cache.write_ruleset(redis_client, mapping)
+    await cache.write_ruleset(redis_client, mapping, expected_epoch=epoch)
     return Response(
         content="[" + ",".join(mapping.values()) + "]",
         media_type="application/json",

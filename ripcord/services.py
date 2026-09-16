@@ -60,6 +60,42 @@ def _variants_from_input(variants: Iterable[VariantIn]) -> list[Variant]:
     ]
 
 
+def _apply_variants(flag: Flag, incoming: Iterable[VariantIn]) -> None:
+    """Merge a new variant set into a flag's existing rows, matching on key.
+
+    Assigning a fresh list to ``flag.variants`` is the obvious thing to write
+    and it is wrong. On a ``delete-orphan`` relationship SQLAlchemy emits the
+    INSERTs for the new rows *before* the DELETEs for the old ones in the same
+    flush, so ``uq_variants_flag_key`` fires for any key present in both sets —
+    which is every ordinary edit. Changing one variant's weight from 50 to 40
+    raised ``IntegrityError`` and surfaced as a 500.
+
+    Matching on key instead means an edit is an UPDATE of the existing row, so
+    the constraint is never challenged. It is also more truthful: a variant
+    whose weight changed is the same variant, and keeping its row keeps its id.
+    """
+    existing = {v.key: v for v in flag.variants}
+    wanted = {v.key: v for v in incoming}
+
+    for key, row in list(existing.items()):
+        if key not in wanted:
+            flag.variants.remove(row)
+
+    for key, incoming_variant in wanted.items():
+        row = existing.get(key)
+        if row is None:
+            flag.variants.append(
+                Variant(
+                    key=key,
+                    value=incoming_variant.value,
+                    weight=incoming_variant.weight,
+                )
+            )
+        else:
+            row.value = incoming_variant.value
+            row.weight = incoming_variant.weight
+
+
 async def get_flag(session: AsyncSession, key: str) -> Flag | None:
     """Fetch a single flag by key (rules eager-loaded), or None if absent."""
     result = await session.execute(select(Flag).where(Flag.key == key))
@@ -132,27 +168,57 @@ async def update_flag(
     if data.rollout_percentage is not None:
         flag.rollout_percentage = data.rollout_percentage
         changes["rollout_percentage"] = data.rollout_percentage
-    if data.rules is not None:
-        # The schema can only cross-check rules against variants when the same
-        # request replaces both. A PATCH that edits rules alone (the common
-        # case from the dashboard) has to be checked against the variants
-        # already stored, which only the service layer can see.
-        if data.variants is None:
-            known = {v.key for v in flag.variants}
-            unknown = sorted(
-                {r.variant for r in data.rules if r.variant and r.variant not in known}
+    # Variants, rules and off_variant constrain each other, so they are
+    # validated together against the state this PATCH would *leave behind* —
+    # not against whatever the request happened to carry. A request that edits
+    # only one of the three still has to be consistent with the stored other
+    # two, and the schema layer cannot see those.
+    effective_variants = (
+        {v.key for v in data.variants}
+        if data.variants is not None
+        else {v.key for v in flag.variants}
+    )
+    effective_rule_variants = (
+        {r.variant for r in data.rules if r.variant}
+        if data.rules is not None
+        else {r.variant for r in flag.rules if r.variant}
+    )
+    # "absent" and "explicitly null" are different requests: the first leaves
+    # off_variant alone, the second clears it. Pydantic collapses both to None,
+    # so model_fields_set is the only way to tell them apart.
+    off_variant_given = "off_variant" in data.model_fields_set
+    effective_off_variant = (
+        data.off_variant if off_variant_given else flag.off_variant
+    )
+
+    unknown = sorted(effective_rule_variants - effective_variants)
+    if unknown:
+        raise InvalidVariantError(
+            f"rule pins unknown variant(s): {', '.join(unknown)}"
+            + (
+                f"; defined: {', '.join(sorted(effective_variants))}"
+                if effective_variants
+                else ""
             )
-            if unknown:
-                raise InvalidVariantError(
-                    f"rule pins unknown variant(s): {', '.join(unknown)}"
-                    + (f"; defined: {', '.join(sorted(known))}" if known else "")
-                )
+        )
+    if effective_off_variant and effective_off_variant not in effective_variants:
+        raise InvalidVariantError(
+            f"off_variant '{effective_off_variant}' is not a defined variant"
+            + (
+                f"; defined: {', '.join(sorted(effective_variants))}"
+                if effective_variants
+                else ""
+            )
+        )
+
+    if data.rules is not None:
         flag.rules = _rules_from_input(data.rules)
         changes["rules"] = len(data.rules)
     if data.variants is not None:
-        flag.variants = _variants_from_input(data.variants)
-        flag.off_variant = data.off_variant
+        _apply_variants(flag, data.variants)
         changes["variants"] = [v.key for v in data.variants]
+    if off_variant_given and data.off_variant != flag.off_variant:
+        flag.off_variant = data.off_variant
         changes["off_variant"] = data.off_variant
 
     # Bump the version ourselves; SQLAlchemy adds the WHERE-version guard.
@@ -164,6 +230,12 @@ async def update_flag(
         # A concurrent writer changed the row between our read and our commit.
         await session.rollback()
         raise VersionConflictError(expected=data.version, current=None) from exc
+    except IntegrityError as exc:
+        # A constraint the validation above did not anticipate. Whatever it is,
+        # a database detail must not reach the client as a 500 — this is the
+        # backstop, not the plan.
+        await session.rollback()
+        raise InvalidVariantError(f"update violates a constraint: {exc.orig}") from exc
     log.info("flag.updated", key=key, version=flag.version, actor=actor)
     return await get_flag(session, key)
 
@@ -315,9 +387,16 @@ async def evaluate_flag_cached(
         return Evaluation(enabled=False, reason="flag_not_found")
 
     # Cold cache: rebuild it from the database, then answer from what we built.
+    # The epoch is read *before* the query so that a flag change landing during
+    # the rebuild makes the publish abort rather than overwrite it.
+    try:
+        epoch = await cache.read_epoch(redis_client)
+    except Exception:
+        epoch = None
     mapping = await build_ruleset_mapping(session)
     try:
-        await cache.write_ruleset(redis_client, mapping)
+        if not await cache.write_ruleset(redis_client, mapping, expected_epoch=epoch):
+            log.info("cache.rebuild_superseded", flag_key=key)
     except Exception:
         log.warning("cache.write_failed", flag_key=key)
     payload = mapping.get(key)

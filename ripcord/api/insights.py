@@ -1,6 +1,6 @@
 """Read-only endpoints powering the dashboard's audit log and metrics pages."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
 from ripcord import services
 from ripcord.deps import ReadDep, SessionDep
@@ -15,7 +15,10 @@ async def get_audit(
     principal: ReadDep,
     session: SessionDep,
     flag_key: str | None = None,
-    limit: int = 100,
+    # Bounded on both sides. Unbounded, `limit=-1` reached Postgres as a
+    # negative LIMIT and came back as a 500 that any read key could trigger,
+    # and a huge limit was unbounded pagination over an append-only table.
+    limit: int = Query(100, ge=1, le=1000),
 ) -> list[AuditEntry]:
     """Return recent change history, newest first (optionally for one flag)."""
     return await services.list_audit(session, flag_key=flag_key, limit=limit)

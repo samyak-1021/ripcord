@@ -21,17 +21,24 @@ redeploy.
   arbitrary JSON, with variant choice hashed on a **different salt** from rollout
   inclusion so a partial rollout doesn't skew the split.
 - **Attribute targeting** — rule DSL (`in` / `not_in` / `eq` / `neq`) that overrides the rollout.
-- **Instant kill switch** — disable a flag and it's off for everyone, immediately.
+- **Instant kill switch** — disable a flag and it's off for everyone on the next
+  evaluation. Cache rebuilds are fenced against concurrent changes so an in-flight
+  rebuild can't republish a snapshot the kill has already overtaken ([why that
+  matters](#the-rebuild-race)).
 - **Real-time propagation** — a change is broadcast over Redis pub/sub and pushed to every
-  client via **Server-Sent Events**, so updates land in <1s with no redeploy.
-- **A Python SDK that evaluates locally** — fetches the ruleset once, evaluates in
-  microseconds with no per-check network hop, auto-refreshes over SSE, and **fails open**.
+  client via **Server-Sent Events**. Measured at **20 ms** end to end against a real
+  server; `scripts/e2e.py` asserts it stays under a second.
+- **A Python SDK that evaluates locally** — fetches the ruleset once, then decides with no
+  network hop at all: **3.3 µs median, 8 µs p99** (`python scripts/bench_eval.py`).
+  Auto-refreshes over SSE, and **fails open** — a failed refresh keeps the last known
+  good ruleset rather than turning every flag off.
 - **Scoped API keys** — SHA-256-digested keys with granular scopes, so the credential
   you ship inside your app (`sdk`) *cannot* flip a flag. Every change is attributed to
   the key that made it in the audit log.
 - **Optimistic concurrency** — versioned updates reject lost writes with a `409`.
-- **Redis-backed hot path** — `/evaluate` is a single `HGET`, not a database query.
-  Measured **4.1× throughput and 6.4× lower p99** than the database path ([numbers](#load-test)).
+- **Redis-backed hot path** — `/evaluate` answers from a Redis hash rather than querying
+  Postgres for the flag. Measured **4.1× throughput and 6.4× lower p99** than the database
+  path ([numbers](#load-test)).
 - **Observability + load-tested** — structured JSON logs, Prometheus `/metrics`, and a k6 suite.
 
 ## Architecture
@@ -161,9 +168,15 @@ await client.close()
 
 ## Authentication
 
-Every endpoint except `/health` and `/metrics` requires an API key. Send it as
+Every endpoint requires an API key except `/health`, `/metrics`, and the
+OpenAPI docs pages (`/docs`, `/redoc`, `/openapi.json`). Send it as
 `Authorization: Bearer <key>` (or `X-API-Key: <key>` — some proxies strip
 `Authorization`).
+
+That list is not prose: `tests/test_auth.py` reads the app's own OpenAPI schema
+and asserts a 401 on every route that isn't on it, so a new endpoint is covered
+the moment it exists rather than when someone remembers to add it to a list.
+Two routes had already drifted off the hand-written version.
 
 **Scopes.** A key carries an explicit set, and `admin` implies all of them:
 
@@ -259,6 +272,49 @@ can't blow up on the hot path. A rule pinning a since-deleted variant degrades t
 weighted split rather than serving nothing.
 
 
+## The rebuild race
+
+Worth writing up, because it is the bug in this project I would actually want to
+talk about — a correctness failure that only exists under concurrency, that no
+unit test could have caught, and that silently broke the feature the service
+exists to provide.
+
+The cache is a Redis hash with per-flag invalidation. Two writers touch it:
+
+- **A change to one flag** rewrites one field (`HSET`) and publishes an event.
+- **A cold-cache rebuild** reads every flag from Postgres and replaces the hash
+  wholesale (`DEL` + `HSET` + `EXPIRE`).
+
+Each is correct alone. Interleaved, they are not:
+
+1. A reader finds the cache cold and starts reading the database. With a few
+   thousand flags that takes a couple of hundred milliseconds.
+2. Mid-read, an operator disables a flag. It commits, and the fresh payload
+   lands in the hash.
+3. The reader finishes. Its `DEL` wipes that fresh field and republishes the
+   **pre-kill** snapshot with a new 300-second TTL.
+
+Nothing is left to invalidate, so the killed flag keeps serving for up to five
+minutes. The window is widest exactly when it hurts most: after a Redis restart,
+with SDKs bootstrapping, while someone is trying to kill a bad feature.
+
+The fix is a fence. A monotonic `ripcord:ruleset:epoch` counter is bumped on
+every change; a rebuild reads it **before** its database query and publishes
+inside a `WATCH`/`MULTI`/`EXEC`, so a snapshot that has been overtaken aborts
+instead of overwriting. An aborted publish costs nothing — the caller already
+holds the mapping it just built and serves from that; the cache is simply cold
+for one more request.
+
+Two details that only showed up when I tried to test it:
+
+- `read_epoch` has to return `"0"` rather than `None` for an unset counter,
+  because `None` was the "no fence requested" sentinel — which disabled the
+  fence precisely in the cold-Redis case the fence exists for.
+- My first end-to-end test passed with the fence removed. The flag it created
+  had `enabled` at its default of `false`, so the "stale" snapshot already said
+  off and there was nothing to serve wrongly. A regression test that passes
+  against the bug is worse than no test.
+
 ## Observability
 
 - **Structured logs** — one JSON object per line (`{"event":"flag.updated","key":"...","version":3,...}`).
@@ -320,13 +376,19 @@ pytest -q
 That is not a way to skip the integration tests — they still run against a real
 database, the schema dropped and recreated per test.
 
-**144 tests**, plus a 37-check end-to-end suite. The evaluation engine has dedicated unit tests for determinism,
-**monotonicity**, **decorrelation** and rollout **distribution**; the API, SDK (incl. the
-SSE watch loop), and optimistic-locking concurrency are covered by integration tests
-against a real database. Auth is tested for 401 on every protected route, 403 on every
-wrong-scope combination, immediate revocation, and that a secret is never recoverable
-from the database — and the whole suite runs *authenticated*, so a regression in the
-credentialed path fails the build.
+**166 tests**, plus a 42-check end-to-end suite. The evaluation engine has dedicated unit
+tests for determinism, **monotonicity**, **decorrelation** and rollout **distribution**;
+the API and optimistic-locking concurrency run against a real database. Auth is the
+best-covered part: the route list comes from the app's own OpenAPI schema, so the
+401 check and the full (route × scope) 403 matrix are exhaustive by construction rather
+than by maintenance, and a separate test proves the declared scope for each route is the
+one that actually works — which is how `/stream` turned out to require `sdk` and not
+`flags:read`. The whole suite runs *authenticated*, so a regression in the credentialed
+path fails the build.
+
+The SDK's watch loop is driven through a fake HTTP client rather than a socket, so it is
+a unit test of the loop, not an integration test — worth saying, because an earlier
+version of this paragraph implied otherwise.
 
 `scripts/e2e.py` covers what in-process tests structurally cannot: a real uvicorn
 process, a schema built by **Alembic rather than `create_all`**, real HTTP, a real SSE
@@ -373,6 +435,23 @@ ripcord/
 - **The dashboard stores its key in `localStorage`** — appropriate for an operator tool
   on a separate origin, but a real multi-user deployment wants SSO and per-user identity
   in the audit log rather than per-key.
+- **The SSE credential travels in the query string.** Browsers' `EventSource` cannot set
+  headers, so `/stream` is the one route that accepts `?api_key=`. Uvicorn logs the whole
+  request line, so a dashboard tab was writing a live operator key into the access log on
+  every reconnect; there is now a redaction filter on `uvicorn.access`, which stops the
+  leak but is not the real fix. The real fix is a short-lived, single-scope stream token
+  minted from the real key, so what appears in a URL is a credential that expires in
+  seconds and can do nothing else.
+- **Verified keys are cached in-process for 5 seconds.** `/evaluate` answers from Redis,
+  but every request still paid an indexed Postgres lookup to *authenticate*, so "no
+  database on the hot path" was only true of the flag. The cost of the cache is that
+  revocation is immediate on the process that handled it and takes up to
+  `AUTH_CACHE_SECONDS` to reach others; set it to `0` to disable. Nothing is cached for a
+  key that fails verification, so a stale entry can only keep a valid key working
+  slightly too long — it can never accept an invalid one.
+- **No rate limiting.** The 256-bit secrets make online brute force a non-issue, but
+  `/keys` and `/evaluate` are unthrottled, so a single client can still saturate the
+  service. A real deployment wants per-key limits at the edge.
 
 ## License
 

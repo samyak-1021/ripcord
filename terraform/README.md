@@ -1,20 +1,47 @@
 # Terraform
 
-Declarative infra for a self-hosted Ripcord stack, via the
-[Docker provider](https://registry.terraform.io/providers/kreuzwerker/docker/latest).
-It builds the API image from the repo `Dockerfile` and runs it alongside
-Postgres and Redis on a private Docker network.
+Brings up the same three containers `docker-compose.yml` does — Postgres, Redis
+and the API — through the Docker provider, so the stack is described as code
+rather than as a list of commands in a README.
+
+It demonstrates the shape; it is not a production module. The Docker provider
+runs containers on whatever machine holds the socket. A real deployment would
+swap the provider for ECS, Cloud Run or a Helm release; what carries over is the
+variable surface and the dependency ordering.
+
+## Using it
 
 ```bash
 cd terraform
-terraform init      # download the docker provider
-terraform validate  # check the config
-terraform apply     # build + run the stack (API on :8000)
-terraform destroy   # tear it all down
+terraform init
+
+# The API refuses to start without a well-formed bootstrap key, so generate one
+# rather than inventing a string: a non-hex key_id parses as garbage and
+# authenticates nobody.
+terraform apply \
+  -var "postgres_password=$(openssl rand -hex 16)" \
+  -var "bootstrap_admin_key=$(python -m ripcord.cli mint-bootstrap)"
 ```
 
-> Stop the `docker compose` stack first — both bind host port 8000.
+Then mint a real key and stop using the bootstrap one:
 
-This is the "reproducible infra" counterpart to `docker-compose.yml` (which is
-the quick dev loop). Same containers, declared as code with explicit
-dependencies and variables.
+```bash
+curl -X POST localhost:8000/keys \
+  -H "Authorization: Bearer $BOOTSTRAP_ADMIN_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "dashboard", "scopes": ["flags:read", "flags:write"]}'
+```
+
+## Known limitation
+
+The API container runs `alembic upgrade head` on start, and the Docker provider
+has no equivalent of compose's `depends_on: condition: service_healthy`, so on a
+cold `apply` the migration can race Postgres accepting connections. The
+container restarts and succeeds on the next attempt; a production module would
+use a readiness gate rather than rely on that.
+
+## Teardown
+
+```bash
+terraform destroy -var "postgres_password=..." -var "bootstrap_admin_key=..."
+```

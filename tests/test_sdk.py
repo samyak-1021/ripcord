@@ -2,6 +2,8 @@
 
 import asyncio
 
+import pytest
+
 from ripcord.sdk import RipcordClient
 
 
@@ -83,12 +85,22 @@ async def test_sdk_fails_open_when_server_unreachable():
 
 
 class _FakeRulesetResponse:
+    """A stand-in for an httpx.Response, faithful where the SDK depends on it.
+
+    ``raise_for_status`` used to be a bare ``pass``, which quietly made every
+    error-status test weaker than it looked: the SDK relies on that call to
+    raise before it overwrites its cached ruleset, so a no-op double let a 5xx
+    body through as if it were a successful fetch. A double that is more
+    forgiving than the real thing tests the double.
+    """
+
     def __init__(self, flags, status_code: int = 200):
         self._flags = flags
         self.status_code = status_code
 
     def raise_for_status(self):
-        pass
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
 
     def json(self):
         return self._flags
@@ -147,6 +159,33 @@ class _UnauthorizedHTTP:
         return _FakeStream([])
 
 
+class _GoesBadHTTP:
+    """Serves a good ruleset once, then breaks.
+
+    "Fails open" is not "returns the caller's default for a key it never had" —
+    that happens whether or not the SDK kept anything. The property that matters
+    is that the *last known good* ruleset survives the outage, and only a client
+    that has successfully loaded one can demonstrate it.
+    """
+
+    def __init__(self, failure: Exception | int):
+        self.failure = failure
+        self.calls = 0
+
+    async def get(self, url):
+        self.calls += 1
+        if self.calls == 1:
+            return _FakeRulesetResponse(
+                [{"key": "f", "enabled": True, "rollout_percentage": 100, "rules": []}]
+            )
+        if isinstance(self.failure, int):
+            return _FakeRulesetResponse([], status_code=self.failure)
+        raise self.failure
+
+    def stream(self, method, url, **kwargs):
+        return _FakeStream([])
+
+
 async def test_sdk_watch_auto_refreshes_on_sse_event():
     """watch=True: a 'flag-change' SSE event triggers a local refresh."""
     sdk = RipcordClient(http_client=_FakeHTTP())
@@ -179,5 +218,52 @@ async def test_sdk_sends_its_api_key():
     sdk = RipcordClient(base_url="http://example.invalid", api_key="rpc_abc123_secret")
     try:
         assert sdk._http.headers["Authorization"] == "Bearer rpc_abc123_secret"
+    finally:
+        await sdk.close()
+
+
+# --- Fail-open, tested for the property it actually claims --------------------
+#
+# The two tests above assert `is_enabled("anything")` after a failed bootstrap.
+# That passes whether or not the SDK preserved anything, because "anything" was
+# never in the ruleset — the default is returned either way. Inserting
+# `self._flags = {}` into refresh()'s except branch destroys fail-open
+# completely and leaves every one of those assertions passing. These two hold
+# the real invariant.
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(ConnectionError("server went away"), id="transport-error"),
+        pytest.param(500, id="server-error"),
+        pytest.param(401, id="credential-revoked"),
+    ],
+)
+async def test_a_failed_refresh_keeps_the_last_known_good_ruleset(failure) -> None:
+    http = _GoesBadHTTP(failure)
+    sdk = RipcordClient(http_client=http)
+    await sdk.start(watch=False)
+    try:
+        assert sdk.is_enabled("f", "u1") is True  # loaded successfully
+
+        await sdk.refresh()  # this one fails, however it fails
+
+        assert http.calls == 2, "the failing refresh must actually have been attempted"
+        assert sdk.is_enabled("f", "u1") is True, (
+            "the SDK discarded its cached ruleset on a failed refresh — "
+            "an outage at the flag service would turn every flag off"
+        )
+    finally:
+        await sdk.close()
+
+
+async def test_a_failed_refresh_does_not_raise_into_the_callers_app() -> None:
+    """The other half: failing open must also mean failing quietly."""
+    sdk = RipcordClient(http_client=_GoesBadHTTP(ConnectionError("down")))
+    await sdk.start(watch=False)
+    try:
+        await sdk.refresh()  # must not raise
+        assert sdk.is_enabled("unknown-key", "u1", default=True) is True
     finally:
         await sdk.close()

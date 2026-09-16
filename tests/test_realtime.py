@@ -178,3 +178,110 @@ async def test_stream_generator_greets_then_forwards_changes(redis_client):
         assert "z" in second["data"]
     finally:
         await events.aclose()  # clean shutdown — no dangling subscription
+
+
+# --- The rebuild-vs-invalidation race -----------------------------------------
+#
+# Everything above tests invalidation and rebuild separately. The bug lived in
+# the overlap: a rebuild reads the database, an operator kills a flag while that
+# read is in flight, and the rebuild's DEL+HSET then republishes the pre-kill
+# snapshot with a fresh 300-second TTL. Nothing is left to invalidate, so the
+# killed flag keeps serving — the one thing a kill switch must never do.
+
+
+async def test_a_rebuild_cannot_republish_a_snapshot_a_change_has_overtaken(
+    client, redis_client
+):
+    """The fence, exercised directly at the cache layer.
+
+    Driving this through HTTP would mean winning a real race, which makes for a
+    flaky test. The mechanism is what matters, so the interleaving is written
+    out explicitly: read the epoch, let a change land, then try to publish.
+    """
+    from ripcord import cache
+
+    stale = {"doomed": '{"key": "doomed", "enabled": true}'}
+
+    # 1. A reader starts a rebuild: epoch first, then its (slow) database read.
+    epoch = await cache.read_epoch(redis_client)
+
+    # 2. Mid-read, an operator kills the flag. This bumps the epoch.
+    await cache.notify_flag_change(
+        redis_client, "doomed", "updated", '{"key": "doomed", "enabled": false}'
+    )
+
+    # 3. The reader finishes and tries to publish what it read.
+    published = await cache.write_ruleset(
+        redis_client, stale, expected_epoch=epoch
+    )
+
+    assert published is False, "a superseded rebuild must not publish"
+    assert await redis_client.hget(RULESET_KEY, "doomed") == (
+        '{"key": "doomed", "enabled": false}'
+    ), "the fresh field survived the rebuild"
+
+
+async def test_an_uncontended_rebuild_still_publishes(client, redis_client):
+    """The fence must not make the cache permanently unfillable."""
+    from ripcord import cache
+
+    epoch = await cache.read_epoch(redis_client)
+    published = await cache.write_ruleset(
+        redis_client, {"a": '{"key": "a"}'}, expected_epoch=epoch
+    )
+
+    assert published is True
+    assert await redis_client.hexists(RULESET_KEY, COMPLETE_FIELD)
+
+
+async def test_killing_a_flag_during_a_cold_rebuild_takes_effect_immediately(
+    client, redis_client
+):
+    """The behaviour the fence exists for, asserted end to end.
+
+    The flag is killed while the cache is cold. Whatever the cache does next,
+    the very next evaluation has to say the flag is off — not in 300 seconds.
+    """
+    await client.post(
+        "/flags",
+        json={
+            "key": "risky",
+            "name": "Risky",
+            # Enabled on purpose. A flag that was never on cannot demonstrate a
+            # kill switch failing, and the first version of this test created
+            # one with `enabled` left at its default of false — so it passed
+            # with the fence removed, which is how I found out.
+            "enabled": True,
+            "rollout_percentage": 100,
+        },
+    )
+    await redis_client.flushdb()  # cold cache, as after a Redis restart
+
+    from ripcord import cache
+
+    # A rebuild that began before the kill: it holds the pre-kill snapshot.
+    epoch = await cache.read_epoch(redis_client)
+    stale = await _mapping_from_api(client)
+
+    killed = await client.patch(
+        "/flags/risky", json={"enabled": False, "version": 1}
+    )
+    assert killed.status_code == 200
+
+    # The in-flight rebuild lands late.
+    await cache.write_ruleset(redis_client, stale, expected_epoch=epoch)
+
+    evaluated = await client.post(
+        "/evaluate", json={"flag_key": "risky", "user_id": "u1"}
+    )
+    assert evaluated.json()["enabled"] is False, (
+        "a killed flag served ON — the rebuild republished a stale snapshot"
+    )
+
+
+async def _mapping_from_api(client) -> dict[str, str]:
+    """The ruleset as a rebuild would have read it, in hash shape."""
+    import json
+
+    flags = (await client.get("/ruleset")).json()
+    return {f["key"]: json.dumps(f) for f in flags}

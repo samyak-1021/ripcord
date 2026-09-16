@@ -281,6 +281,9 @@ async def main() -> int:
         task = asyncio.create_task(listen())
         await asyncio.sleep(1.5)  # let the subscription establish
         current = (await client.get("/flags/e2e-mv", headers=admin)).json()["version"]
+        # Timed, because the README claims a number. Everything before this
+        # point asserts that a change *arrives*; this asserts how fast.
+        changed_at = time.perf_counter()
         await client.patch(
             "/flags/e2e-mv",
             headers=admin,
@@ -290,6 +293,7 @@ async def main() -> int:
             await asyncio.wait_for(task, timeout=15)
         except TimeoutError:
             task.cancel()
+        propagation_ms = (time.perf_counter() - changed_at) * 1000
         check(
             "a flag change reaches an SSE subscriber",
             len(received) == 1,
@@ -298,6 +302,65 @@ async def main() -> int:
         check(
             "SSE stream authenticates via ?api_key= (EventSource can't set headers)",
             len(received) == 1,
+        )
+        # The README says updates land in under a second. That was an
+        # unmeasured claim until this check existed; the generous bound is
+        # deliberate, because the useful assertion is "sub-second, not
+        # sub-minute" and a tight one would flake on a loaded CI runner.
+        check(
+            f"the change propagated in under 1s ({propagation_ms:.0f}ms)",
+            len(received) == 1 and propagation_ms < 1000,
+            f"{propagation_ms:.0f}ms",
+        )
+
+        section("Editing a multivariate flag")
+        # This is the operation the dashboard's "Save variants" button performs,
+        # and it used to be a hard 500: replacing the variant collection made
+        # SQLAlchemy insert the new rows before deleting the old ones, so the
+        # (flag_id, key) unique constraint fired for any key kept across the
+        # edit. Nothing in the suite edited variants, so nothing caught it.
+        mv = (await client.get("/flags/e2e-mv", headers=admin)).json()
+        keys = [v["key"] for v in mv["variants"]]
+        reweighted = await client.patch(
+            "/flags/e2e-mv",
+            headers=admin,
+            json={
+                "version": mv["version"],
+                "variants": [
+                    {"key": keys[0], "value": {"n": 1}, "weight": 70},
+                    {"key": keys[1], "value": {"n": 2}, "weight": 30},
+                ],
+            },
+        )
+        check(
+            "reweighting existing variants succeeds",
+            reweighted.status_code == 200,
+            f"got {reweighted.status_code}: {reweighted.text[:160]}",
+        )
+        check(
+            "the new weights were stored",
+            reweighted.status_code == 200
+            and {v["key"]: v["weight"] for v in reweighted.json()["variants"]}
+            == {keys[0]: 70, keys[1]: 30},
+        )
+        off = await client.patch(
+            "/flags/e2e-mv",
+            headers=admin,
+            json={
+                "version": reweighted.json()["version"],
+                "off_variant": keys[0],
+            },
+        )
+        check(
+            "off_variant can be set on its own",
+            off.status_code == 200 and off.json()["off_variant"] == keys[0],
+            f"got {off.status_code}: {off.text[:160]}",
+        )
+        bad_limit = await client.get("/audit?limit=-1", headers=admin)
+        check(
+            "a negative audit limit is a 422, not a 500",
+            bad_limit.status_code == 422,
+            f"got {bad_limit.status_code}",
         )
 
         section("Audit attribution")

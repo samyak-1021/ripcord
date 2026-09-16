@@ -31,6 +31,23 @@ def create_app() -> FastAPI:
             detail="AUTH_ENABLED=false - the management API is unauthenticated",
         )
 
+    # A bootstrap key that cannot be parsed is rejected inside `authenticate`
+    # long before it is ever compared, so a malformed one does not warn — it
+    # just silently authenticates nobody. The shipped docker-compose default had
+    # a non-hex key_id for exactly this reason: nothing anywhere said so, and
+    # `docker compose up` produced a stack where every route but /health
+    # returned 401. Failing at startup turns a confusing runtime symptom into an
+    # obvious configuration error.
+    if settings.bootstrap_admin_key:
+        from ripcord.auth import split_key
+
+        if split_key(settings.bootstrap_admin_key) is None:
+            raise RuntimeError(
+                "BOOTSTRAP_ADMIN_KEY is malformed and would authenticate nobody. "
+                "Expected rpc_<12 hex chars>_<secret>; generate one with "
+                "`python -m ripcord.cli mint-bootstrap`."
+            )
+
     app = FastAPI(
         title="Ripcord",
         summary="A self-hostable feature-flag & gradual-rollout service.",

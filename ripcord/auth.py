@@ -21,6 +21,18 @@ a digest matched via response timing.
 read path (``sdk``) is separated from the management write path (``flags:write``)
 so the credential you ship inside your application binary cannot flip a flag —
 which is the entire point of having auth on a flag service at all.
+
+**The verification cache.** ``/evaluate`` answers from Redis, but every request
+still paid one indexed Postgres lookup to verify its key — so the "no database
+on the hot path" story was only true of the flag, not of the request. Verified
+keys are now held in-process for a few seconds.
+
+The cost is explicit: revocation is immediate in the process that handled it
+(the route clears the entry) and takes up to ``auth_cache_seconds`` to reach
+other processes. That window is the whole reason the TTL is small. Nothing is
+cached for a key that fails verification, so this never turns a rejected key
+into an accepted one — a stale entry can only keep a *valid* key working
+slightly too long.
 """
 
 from __future__ import annotations
@@ -28,6 +40,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
@@ -173,6 +186,39 @@ async def _touch_last_used(session: AsyncSession, api_key: ApiKey) -> None:
         log.warning("auth.last_used_update_failed", key_id=api_key.key_id)
 
 
+@dataclass(frozen=True)
+class _CachedKey:
+    """Everything authentication needs about a key, without touching the row."""
+
+    secret_hash: str
+    name: str
+    scopes: frozenset[str]
+    expires_at: float
+
+
+# key_id -> the verified record. Per-process and deliberately small: it holds
+# only keys that have actually been used, and entries expire on read.
+_key_cache: dict[str, _CachedKey] = {}
+
+
+def invalidate_key_cache(key_id: str | None = None) -> None:
+    """Drop one cached key, or all of them. Called on revoke, and by tests."""
+    if key_id is None:
+        _key_cache.clear()
+    else:
+        _key_cache.pop(key_id, None)
+
+
+def _cached(key_id: str) -> _CachedKey | None:
+    entry = _key_cache.get(key_id)
+    if entry is None:
+        return None
+    if entry.expires_at <= time.monotonic():
+        _key_cache.pop(key_id, None)
+        return None
+    return entry
+
+
 async def authenticate(session: AsyncSession, full_key: str) -> Principal | None:
     """Resolve a raw key string to a Principal, or None if it is not valid."""
     parts = split_key(full_key)
@@ -184,8 +230,17 @@ async def authenticate(session: AsyncSession, full_key: str) -> Principal | None
     # you use to mint the first real key, and to recover if every stored key is
     # revoked. It is compared in constant time like any other credential.
     bootstrap = settings.bootstrap_admin_key
-    if bootstrap and hmac.compare_digest(full_key, bootstrap):
+    if bootstrap and hmac.compare_digest(full_key.encode(), bootstrap.encode()):
         return Principal(name="bootstrap", scopes=frozenset({SCOPE_ADMIN}))
+
+    # A hit skips Postgres entirely. The digest is still compared in constant
+    # time against the cached hash, so a cache hit is not a weaker check — it
+    # is the same check against the same material, without the round trip.
+    entry = _cached(key_id)
+    if entry is not None:
+        if not hmac.compare_digest(entry.secret_hash, hash_secret(secret)):
+            return None
+        return Principal(name=entry.name, scopes=entry.scopes, key_id=key_id)
 
     result = await session.execute(select(ApiKey).where(ApiKey.key_id == key_id))
     api_key = result.scalar_one_or_none()
@@ -194,9 +249,19 @@ async def authenticate(session: AsyncSession, full_key: str) -> Principal | None
         hash_secret(secret)
         return None
     if api_key.revoked_at is not None:
+        # Never cached. A revoked key must cost a lookup every time rather than
+        # risk a tombstone being served from memory as a live record.
         return None
     if not hmac.compare_digest(api_key.secret_hash, hash_secret(secret)):
         return None
+
+    if settings.auth_cache_seconds > 0:
+        _key_cache[key_id] = _CachedKey(
+            secret_hash=api_key.secret_hash,
+            name=api_key.name,
+            scopes=frozenset(api_key.scopes),
+            expires_at=time.monotonic() + settings.auth_cache_seconds,
+        )
 
     await _touch_last_used(session, api_key)
     return Principal(

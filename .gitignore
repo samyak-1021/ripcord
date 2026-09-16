@@ -1,25 +1,37 @@
-# Python
 __pycache__/
 *.py[cod]
 .venv/
 venv/
+.venv312/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
-
-# Environment (never commit real secrets)
-.env
-
-# Node (dashboard, added in a later phase)
-node_modules/
-.next/
-
-# OS / editor
 .DS_Store
 .idea/
 .vscode/
 
-# Terraform
-.terraform/
+# Redis writes this wherever it is started from. It is a database snapshot,
+# not source.
+dump.rdb
+
+# Local secrets. `.env.example` is the documented template and is tracked; a
+# real `.env` holds a bootstrap admin key and must never be.
+.env
+.env.*
+!.env.example
+
+# Next.js
+dashboard/node_modules/
+dashboard/.next/
+dashboard/out/
+
+# Terraform. `terraform init` downloads a provider binary — 62 MB for
+# kreuzwerker/docker on arm64 — into .terraform/, and state files can contain
+# credentials. The lock file IS tracked on purpose: it pins provider versions,
+# which is the reproducibility the module is there to demonstrate.
+**/.terraform/
 *.tfstate
 *.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log

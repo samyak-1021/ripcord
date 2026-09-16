@@ -75,5 +75,8 @@ async def revoke_key(
     if api_key.revoked_at is None:
         api_key.revoked_at = datetime.now(UTC)
         await session.commit()
+        # Revocation is immediate on this process. Other processes fall back to
+        # the verification cache's TTL — see auth.py's module docstring.
+        auth.invalidate_key_cache(key_id)
         log.info("apikey.revoked", key_id=key_id, actor=principal.name)
     return api_key

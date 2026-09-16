@@ -313,3 +313,189 @@ async def test_sdk_serves_variants_locally(client: AsyncClient) -> None:
             assert sdk.value("checkout", user) == server["value"]
     finally:
         await sdk.close()
+
+
+# --- Editing an existing variant set ------------------------------------------
+#
+# Every test above creates a flag. None of them edited one, and that gap hid a
+# hard 500 on the single most common multivariate operation: changing a weight.
+# Assigning a new list to `flag.variants` made SQLAlchemy INSERT the new rows
+# before DELETEing the old ones, so the (flag_id, key) unique constraint fired
+# for any key present in both sets. The dashboard's "Save variants" button sent
+# exactly that request.
+
+
+async def test_changing_a_variant_weight_keeps_the_same_keys(
+    client: AsyncClient,
+) -> None:
+    """The regression test. 50/50 -> 60/40 with the same two keys."""
+    await client.post("/flags", json=MV)
+
+    patched = await client.patch(
+        "/flags/checkout",
+        json={
+            "version": 1,
+            "variants": [
+                {"key": "control", "value": {"color": "grey"}, "weight": 60},
+                {"key": "blue", "value": {"color": "blue"}, "weight": 40},
+            ],
+        },
+    )
+
+    assert patched.status_code == 200, patched.text
+    assert {v["key"]: v["weight"] for v in patched.json()["variants"]} == {
+        "control": 60,
+        "blue": 40,
+    }
+
+
+async def test_editing_a_variant_value_preserves_its_row_id(
+    client: AsyncClient,
+) -> None:
+    """An edited variant is the same variant, so it keeps its identity.
+
+    This is what distinguishes a real merge from a delete-and-recreate that
+    happens to avoid the constraint.
+    """
+    await client.post("/flags", json=MV)
+    before = {v["key"]: v["id"] for v in (await client.get("/flags/checkout")).json()["variants"]}
+
+    await client.patch(
+        "/flags/checkout",
+        json={
+            "version": 1,
+            "variants": [
+                {"key": "control", "value": {"color": "charcoal"}, "weight": 50},
+                {"key": "blue", "value": {"color": "blue"}, "weight": 50},
+            ],
+        },
+    )
+
+    after = (await client.get("/flags/checkout")).json()["variants"]
+    assert {v["key"]: v["id"] for v in after} == before
+    assert next(v for v in after if v["key"] == "control")["value"] == {
+        "color": "charcoal"
+    }
+
+
+async def test_a_variant_can_be_added_removed_and_kept_in_one_patch(
+    client: AsyncClient,
+) -> None:
+    """The three-way case: one key stays, one goes, one arrives."""
+    await client.post("/flags", json=MV)
+
+    patched = await client.patch(
+        "/flags/checkout",
+        json={
+            "version": 1,
+            "variants": [
+                {"key": "control", "value": {"color": "grey"}, "weight": 34},
+                {"key": "green", "value": {"color": "green"}, "weight": 66},
+            ],
+        },
+    )
+
+    assert patched.status_code == 200, patched.text
+    assert [v["key"] for v in patched.json()["variants"]] == ["control", "green"]
+
+
+async def test_patching_variants_cannot_orphan_a_rule_pinned_variant(
+    client: AsyncClient,
+) -> None:
+    """Rules are checked against the variants this PATCH would leave behind.
+
+    Previously a request that replaced only `variants` was never checked
+    against the *stored* rules, so a rule could be left pinning a variant that
+    no longer existed. The engine survived it — it falls back to the weighted
+    split — but the API is supposed to make that state unreachable.
+    """
+    await client.post(
+        "/flags",
+        json={
+            **MV,
+            "rules": [
+                {
+                    "attribute": "country",
+                    "operator": "in",
+                    "values": ["IN"],
+                    "priority": 1,
+                    "variant": "blue",
+                }
+            ],
+        },
+    )
+
+    orphaning = await client.patch(
+        "/flags/checkout",
+        json={
+            "version": 1,
+            "variants": [
+                {"key": "alpha", "value": 1, "weight": 50},
+                {"key": "beta", "value": 2, "weight": 50},
+            ],
+        },
+    )
+
+    assert orphaning.status_code == 422
+    assert "blue" in orphaning.text
+
+
+async def test_off_variant_can_be_changed_on_its_own(client: AsyncClient) -> None:
+    """`off_variant` used to be applied only inside `if variants is not None`.
+
+    A PATCH carrying only `off_variant` returned 200, bumped the version, wrote
+    an audit row and broadcast a change event — and discarded the edit. Every
+    signal said it had worked.
+    """
+    await client.post("/flags", json={**MV, "off_variant": "control"})
+
+    patched = await client.patch(
+        "/flags/checkout", json={"version": 1, "off_variant": "blue"}
+    )
+
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["off_variant"] == "blue"
+    assert (await client.get("/flags/checkout")).json()["off_variant"] == "blue"
+
+
+async def test_off_variant_alone_is_validated_against_stored_variants(
+    client: AsyncClient,
+) -> None:
+    await client.post("/flags", json=MV)
+
+    rejected = await client.patch(
+        "/flags/checkout", json={"version": 1, "off_variant": "does-not-exist"}
+    )
+
+    assert rejected.status_code == 422
+    assert "does-not-exist" in rejected.text
+
+
+async def test_off_variant_can_be_cleared_with_an_explicit_null(
+    client: AsyncClient,
+) -> None:
+    """Absent and explicitly-null are different requests.
+
+    Pydantic collapses both to None, so the service distinguishes them with
+    `model_fields_set` — without that there is no way to express "remove the
+    off_variant" at all.
+    """
+    await client.post("/flags", json={**MV, "off_variant": "control"})
+
+    cleared = await client.patch(
+        "/flags/checkout", json={"version": 1, "off_variant": None}
+    )
+
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["off_variant"] is None
+
+
+async def test_a_patch_that_omits_off_variant_leaves_it_alone(
+    client: AsyncClient,
+) -> None:
+    """The other half of the same distinction: omission must not clear it."""
+    await client.post("/flags", json={**MV, "off_variant": "control"})
+
+    await client.patch("/flags/checkout", json={"version": 1, "enabled": False})
+
+    assert (await client.get("/flags/checkout")).json()["off_variant"] == "control"

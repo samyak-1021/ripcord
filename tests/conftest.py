@@ -121,6 +121,19 @@ async def app(session: AsyncSession, redis_client: redis.Redis):
     application.dependency_overrides.clear()
 
 
+@pytest.fixture(autouse=True)
+def _clear_key_cache() -> Generator[None, None, None]:
+    """Start every test with an empty verification cache.
+
+    The cache is per-process and the whole suite shares one, so without this a
+    key minted in one test could still authenticate in the next — which would
+    make the revocation tests pass for the wrong reason.
+    """
+    auth.invalidate_key_cache()
+    yield
+    auth.invalidate_key_cache()
+
+
 @pytest_asyncio.fixture
 async def anon_client(app) -> AsyncGenerator[AsyncClient, None]:
     """An HTTP client that sends no credentials — for asserting 401s."""

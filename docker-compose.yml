@@ -42,7 +42,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://ripcord:ripcord@postgres:5432/ripcord
       REDIS_URL: redis://redis:6379/0
       AUTH_ENABLED: "true"
-      BOOTSTRAP_ADMIN_KEY: ${BOOTSTRAP_ADMIN_KEY:-rpc_0000devonly00_LOCAL-DEVELOPMENT-KEY-DO-NOT-USE-IN-PRODUCTION}
+      BOOTSTRAP_ADMIN_KEY: ${BOOTSTRAP_ADMIN_KEY:-rpc_0000deadbeef_LOCAL-DEVELOPMENT-KEY-DO-NOT-USE-IN-PRODUCTION}
       CORS_ORIGINS: '["http://localhost:3000"]'
     depends_on:
       postgres:

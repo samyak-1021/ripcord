@@ -108,7 +108,16 @@ def bucket_for(flag_key: str, user_id: str, salt: str = "") -> int:
     ``salt`` gives an independent bucket for the same (flag, user) pair, which
     is how variant choice is decorrelated from rollout inclusion.
     """
-    material = f"{flag_key}:{salt}:{user_id}" if salt else f"{flag_key}:{user_id}"
+    # NUL-joined rather than colon-joined. Colons appear in real user ids, and
+    # a flat join lets one field's content impersonate another: with the old
+    # format, bucket_for("f", "variant:alice") and
+    # bucket_for("f", "alice", salt="variant") hashed the same bytes. A tenant
+    # whose ids happened to start with "variant:" would get rollout inclusion
+    # perfectly correlated with variant assignment — the exact coupling the
+    # separate salt exists to prevent. NUL cannot occur in a flag key, a salt,
+    # or any credible user id, so the fields can no longer bleed into one
+    # another.
+    material = "\x00".join((flag_key, salt, user_id))
     digest = hashlib.md5(material.encode(), usedforsecurity=False).hexdigest()
     return int(digest[:8], 16) % _BUCKET_COUNT
 

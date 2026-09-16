@@ -31,6 +31,12 @@ class Settings(BaseSettings):
     # so turning it off has to be a deliberate act (and logs a loud warning).
     auth_enabled: bool = True
 
+    # Seconds to hold a verified key in process memory. Small on purpose: it is
+    # also the worst-case delay before a revocation takes effect on a server
+    # other than the one that processed it. 0 disables the cache entirely,
+    # which is what the auth tests use so revocation is observable immediately.
+    auth_cache_seconds: float = 5.0
+
     # A single admin key accepted without a database lookup. This exists to
     # solve the bootstrap problem — you need a key to mint the first key — and
     # for ephemeral environments like CI. Leave it unset in production once a

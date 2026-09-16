@@ -32,6 +32,11 @@ RULESET_KEY = "ripcord:ruleset"
 # Reserved field marking the hash as fully populated. Unreachable as a flag key.
 COMPLETE_FIELD = "__ruleset__"
 
+# Monotonic counter bumped on every flag change. A cold-cache rebuild reads it
+# *before* querying the database and refuses to publish its snapshot if the
+# counter moved in the meantime — see ``write_ruleset``.
+EPOCH_KEY = "ripcord:ruleset:epoch"
+
 # Channel that mutations publish to and every SSE stream subscribes to.
 CHANGES_CHANNEL = "ripcord:flag-changes"
 
@@ -77,17 +82,65 @@ async def read_flag(client: redis.Redis, flag_key: str) -> str | None | bool:
     return False if complete else None
 
 
-async def write_ruleset(client: redis.Redis, mapping: dict[str, str]) -> None:
-    """Replace the cached ruleset with ``mapping`` and mark it complete.
+async def read_epoch(client: redis.Redis) -> str:
+    """The change counter as it stands right now.
+
+    Read this *before* querying the database, not after. A rebuild that reads
+    the epoch after its own snapshot cannot tell whether a change landed in
+    between, which is the whole point of the fence.
+
+    Returns ``"0"`` rather than ``None`` when the counter has never been set.
+    That distinction cost me the first version of this fix: ``write_ruleset``
+    treats ``None`` as "no fence requested", so an unset counter — which is
+    exactly the state after a Redis restart, when the race is most likely —
+    silently disabled the fence on every rebuild.
+    """
+    return await client.get(EPOCH_KEY) or "0"
+
+
+async def write_ruleset(
+    client: redis.Redis, mapping: dict[str, str], expected_epoch: str | None = None
+) -> bool:  # noqa: D401
+    """Publish ``mapping`` as the complete cached ruleset. True if it landed.
 
     Written in one transaction so a concurrent reader never observes a
     half-populated hash marked complete.
+
+    **Why the epoch fence.** A rebuild is a destructive write: ``DEL`` then
+    ``HSET`` everything. That is correct in isolation and badly wrong under
+    concurrency. The sequence that broke it:
+
+      1. A reader finds the cache cold and starts reading the database. With a
+         few thousand flags this takes a couple of hundred milliseconds.
+      2. Mid-read, an operator disables a flag. The write commits and
+         ``notify_flag_change`` puts the fresh payload in the hash.
+      3. The reader finishes and calls ``write_ruleset``, whose ``DEL`` wipes
+         that fresh field and republishes the *stale* snapshot with a new
+         300-second TTL.
+
+    Nothing is left to invalidate, so the killed flag keeps serving for up to
+    five minutes — which is exactly the promise a kill switch is supposed to
+    make. Passing the epoch read before step 1 makes the transaction abort in
+    step 3 instead. The caller already holds the fresh mapping it just built,
+    so an abort costs nothing but a cold cache for one more request.
     """
-    async with client.pipeline(transaction=True) as pipe:
-        pipe.delete(RULESET_KEY)
-        pipe.hset(RULESET_KEY, mapping={**mapping, COMPLETE_FIELD: "1"})
-        pipe.expire(RULESET_KEY, RULESET_TTL_SECONDS)
-        await pipe.execute()
+    try:
+        async with client.pipeline(transaction=True) as pipe:
+            if expected_epoch is not None:
+                await pipe.watch(EPOCH_KEY)
+                if (await pipe.get(EPOCH_KEY) or "0") != expected_epoch:
+                    await pipe.reset()
+                    return False
+                pipe.multi()
+            pipe.delete(RULESET_KEY)
+            pipe.hset(RULESET_KEY, mapping={**mapping, COMPLETE_FIELD: "1"})
+            pipe.expire(RULESET_KEY, RULESET_TTL_SECONDS)
+            await pipe.execute()
+    except redis.WatchError:
+        # Someone changed a flag between the WATCH and the EXEC. Same outcome
+        # as the explicit mismatch above: do not publish a stale snapshot.
+        return False
+    return True
 
 
 async def notify_flag_change(
@@ -105,6 +158,12 @@ async def notify_flag_change(
     next reconnect.
     """
     try:
+        # Bump the fence *first*. A rebuild whose database snapshot predates
+        # this change will now fail its epoch check and refuse to overwrite the
+        # field we are about to write. Doing it afterwards would leave a window
+        # where the field is fresh but the epoch is not, and a rebuild landing
+        # in that window would clobber it undetected.
+        await client.incr(EPOCH_KEY)
         if action == "deleted":
             await client.hdel(RULESET_KEY, flag_key)
         elif payload is not None:
